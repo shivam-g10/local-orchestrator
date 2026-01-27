@@ -29,7 +29,7 @@ pub fn get_ai_response(api_key: &str, prompt: &str) -> Result<Option<String>, re
                     return Err(e);
                 }
                 Ok(t) => {
-                    logger::info(&format!("Got AI Response: {t}"));
+                    logger::debug(&format!("Got AI Response: {t}"));
                     t
                 }
             };
@@ -109,7 +109,6 @@ mod test {
     #[test]
     fn test_request() {
         config::init();
-        let _ = logger::init();
         let api_key = config::get_env::<String>("OPENAI_API_KEY");
         let prompt = "Hi";
         let result = get_ai_response(&api_key, prompt);

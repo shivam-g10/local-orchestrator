@@ -4,6 +4,7 @@ use cron::Schedule;
 use std::fmt;
 mod executor;
 pub mod utils;
+mod open_ai;
 use uuid::Uuid;
 
 use crate::block::executor::{ExecutorError, execute_ai, execute_cron, execute_file};

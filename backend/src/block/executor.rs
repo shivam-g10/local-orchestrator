@@ -1,9 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    block::{AIBlockBody, CronBlockBody, FileBlockBody, FileOperationType},
+    block::{AIBlockBody, CronBlockBody, FileBlockBody, FileOperationType, open_ai::get_ai_response},
     logger,
-    open_ai::get_ai_response,
 };
 
 #[derive(Error, Debug)]
@@ -120,13 +119,13 @@ mod test {
             }
         };
         let body: FileBlockBody = FileBlockBody {
-            file_name: "test_read.md".to_string(),
+            file_name: ".gitignore".to_string(),
             location: current_dir,
             operation: FileOperationType::READ,
         };
         match execute_file(None, body.clone()) {
             Ok(Some(content)) => {
-                assert_eq!(content, "testing read");
+                assert!(content.contains("/target"));
             }
             Ok(None) => {
                 panic!("No content to read");

@@ -1,10 +1,13 @@
 use std::{env, path::Path};
 /// Initialize the environment variables
 pub fn init() {
-    let _ = dotenvy::from_path(Path::new(
-        format!("{}/.env", env!("CARGO_MANIFEST_DIR")).as_str(),
-    ));
-    dotenvy::dotenv().ok();
+    let env = get_env::<String>("DEPLOY_ENV");
+    if env.is_empty() || env == "development" {
+        let _ = dotenvy::from_path(Path::new(
+            format!("{}/.env", env!("CARGO_MANIFEST_DIR")).as_str(),
+        ));
+        dotenvy::dotenv().ok();
+    }
 }
 /// Get the environment variable
 pub fn get_env<T: std::str::FromStr + Default>(key: &str) -> T {
