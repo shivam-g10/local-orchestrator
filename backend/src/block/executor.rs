@@ -21,7 +21,7 @@ pub enum ExecutorError {
 }
 
 pub fn execute_cron(_: Option<String>, _: CronBlockBody) -> Result<Option<String>, ExecutorError> {
-    return Ok(None);
+    Ok(None)
 }
 
 pub fn execute_ai(
@@ -32,9 +32,9 @@ pub fn execute_ai(
     let final_prompt = body.prompt.replace("###INPUT", &replace_input);
     match get_ai_response(&body.api_key, &final_prompt) {
         Err(e) => {
-            return Err(ExecutorError::AiApiError(e));
+            Err(ExecutorError::AiApiError(e))
         }
-        Ok(result) => return Ok(result),
+        Ok(result) => Ok(result),
     }
 }
 
@@ -56,15 +56,15 @@ pub fn execute_file(
     match &body.operation {
         FileOperationType::WRITE => {
             let path = body.location + "/" + &body.file_name;
-            let contents = input.unwrap_or(String::new());
+            let contents = input.unwrap_or_default();
             match std::fs::write(&path, contents) {
                 Err(e) => {
                     logger::error(&format!("Error writing to file {e}"));
-                    return Err(ExecutorError::FileError(path, e));
+                    Err(ExecutorError::FileError(path, e))
                 }
                 Ok(_) => {
-                    logger::info(&format!("File write completed successfully"));
-                    return Ok(None);
+                    logger::info("File write completed successfully");
+                    Ok(None)
                 }
             }
         }
@@ -72,11 +72,11 @@ pub fn execute_file(
             let path = body.location + "/" + &body.file_name;
             match std::fs::read_to_string(&path) {
                 Err(e) => {
-                    return Err(ExecutorError::FileError(path, e));
+                    Err(ExecutorError::FileError(path, e))
                 }
                 Ok(content) => {
                     logger::info("File read successful");
-                    return Ok(Some(content));
+                    Ok(Some(content))
                 }
             }
         }
@@ -92,8 +92,7 @@ mod test {
         let current_dir = match env::current_dir() {
             Ok(dir) => dir.to_str().unwrap().to_owned(),
             Err(e) => {
-                assert!(false, "Error getting cwd {e}");
-                String::new()
+                panic!("Error getting cwd {e}");
             }
         };
         let body: FileBlockBody = FileBlockBody {
@@ -103,7 +102,7 @@ mod test {
         };
         match execute_file(Some("test".to_string()), body.clone()) {
             Err(e) => {
-                assert!(false, "Error writing to file {e}")
+                panic!("Error writing to file {e}");
             }
             Ok(_) => {
                 let path = body.location + "/" + &body.file_name;
@@ -117,8 +116,7 @@ mod test {
         let current_dir = match env::current_dir() {
             Ok(dir) => dir.to_str().unwrap().to_owned(),
             Err(e) => {
-                assert!(false, "Error getting cwd {e}");
-                String::new()
+                panic!("Error getting cwd {e}");
             }
         };
         let body: FileBlockBody = FileBlockBody {
@@ -131,10 +129,10 @@ mod test {
                 assert_eq!(content, "testing read");
             }
             Ok(None) => {
-                assert!(false, "No content read");
+                panic!("No content to read");
             }
             Err(e) => {
-                assert!(false, "error {e}");
+                panic!("error {e}");
             }
         }
     }

@@ -25,8 +25,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let dt = chrono::Local::now();
     let naive_utc = dt.naive_utc();
-    let offset = dt.offset().clone();
-    let dt_new = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(naive_utc, offset);
+    let offset = dt.offset();
+    let dt_new = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(naive_utc, *offset);
     let dt_str = dt_new.to_string();
     flow.register_block(cron_block.clone());
 
@@ -54,6 +54,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     flow.register_forward_link(&ai_search_block, &ai_report);
     flow.register_forward_link(&ai_report, &file_save_block);
 
-    flow.execute(cron_block.get_id().clone());
-    return Ok(());
+    flow.execute(*cron_block.get_id());
+    Ok(())
 }

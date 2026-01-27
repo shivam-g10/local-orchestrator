@@ -10,17 +10,23 @@ pub struct Workflow {
     blocks: HashMap<Uuid, Box<dyn BlockExecutorTrait>>,
 }
 
-impl Workflow {
-    pub fn new() -> Self {
+impl Default for Workflow {
+    fn default() -> Self {
         Self {
             id: Uuid::new_v4(),
             links: HashMap::new(),
             blocks: HashMap::new(),
         }
     }
+}
+
+impl Workflow {
+    pub fn new() -> Self {
+        Workflow::default()
+    }
 
     pub fn register_block<T: BlockExecutorTrait + 'static>(&mut self, block: T) {
-        self.blocks.insert(block.get_id().clone(), Box::new(block));
+        self.blocks.insert(*block.get_id(), Box::new(block));
     }
 
     pub fn register_forward_link<T: BlockExecutorTrait, U: BlockExecutorTrait>(
@@ -33,13 +39,13 @@ impl Workflow {
             Some(list) => list.clone(),
         };
         if !value.contains(next.get_id()) {
-            value.push(next.get_id().clone());
-            self.links.insert(prev.get_id().clone(), value);
+            value.push(*next.get_id());
+            self.links.insert(*prev.get_id(), value);
         }
     }
 
     pub fn get_id(&self) -> &Uuid {
-        return &self.id;
+        &self.id
     }
 
     pub fn execute(&self, mut next_block: Uuid) {
@@ -76,7 +82,7 @@ impl Workflow {
                                 run = false;
                             }
                             Some(id) => {
-                                next_block = id.clone();
+                                next_block = *id;
                             }
                         }
                     }

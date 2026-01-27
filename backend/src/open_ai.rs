@@ -21,7 +21,7 @@ pub fn get_ai_response(api_key: &str, prompt: &str) -> Result<Option<String>, re
     match client.execute(request) {
         Err(e) => {
             logger::error(&format!("Error sending request {:#?}", e));
-            return Err(e);
+            Err(e)
         }
         Ok(res) => {
             let result = match res.text() {
@@ -34,12 +34,12 @@ pub fn get_ai_response(api_key: &str, prompt: &str) -> Result<Option<String>, re
                 }
             };
             match serde_json::from_str::<OpenAIResponse>(&result) {
-                Err(e) => return Ok(Some(e.to_string())),
+                Err(e) => Ok(Some(e.to_string())),
                 Ok(res) => {
-                    let content = res.output.iter().find(|r| r.content.is_some()).take();
+                    let content = res.output.iter().find(|r| r.content.is_some());
                     if let Some(output) = content {
                         match &output.content {
-                            Some(c) => match c.get(0) {
+                            Some(c) => match c.first() {
                                 Some(nested_content) => {
                                     return Ok(Some(nested_content.text.clone()));
                                 }
@@ -52,7 +52,7 @@ pub fn get_ai_response(api_key: &str, prompt: &str) -> Result<Option<String>, re
                             }
                         }
                     }
-                    return Ok(None);
+                    Ok(None)
                 }
             }
         }
@@ -91,13 +91,13 @@ struct OpenAIContent {
 }
 
 fn get_request_body(prompt: &str) -> Body {
-    return Body {
+    Body {
         model: "gpt-5-nano".to_string(),
         input: prompt.to_string(),
         tools: vec![OpenAITools {
             tool_type: "web_search".to_string(),
         }],
-    };
+    }
 }
 
 #[cfg(test)]
@@ -115,10 +115,10 @@ mod test {
         let result = get_ai_response(&api_key, prompt);
         match result {
             Err(e) => {
-                assert!(false, "Error in sending request {e}");
+               panic!("Error in sending request {e}");
             }
             Ok(None) => {
-                assert!(false, "Succeeded without response");
+                panic!("Succeeded without response");
             }
 
             Ok(Some(_)) => {}

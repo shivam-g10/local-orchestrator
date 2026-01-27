@@ -42,16 +42,16 @@ impl AIBlockBody {
 
     pub fn set_provider(&mut self, provider: AIProvider) -> &mut Self {
         self.provider = provider;
-        return self;
+        self
     }
 
     pub fn set_prompt(&mut self, prompt: String) -> &mut Self {
         self.prompt = prompt;
-        return self;
+        self
     }
     pub fn set_api_key(&mut self, api_key: String) -> &mut Self {
         self.api_key = api_key;
-        return self;
+        self
     }
 }
 
@@ -64,10 +64,10 @@ impl CronBlockBody {
     pub fn new(cron: String) -> Result<Self, cron::error::Error> {
         match Schedule::from_str(cron.as_str()) {
             Ok(_) => {
-                return Ok(Self { cron });
+                Ok(Self { cron })
             }
             Err(err) => {
-                return Err(err);
+                Err(err)
             }
         }
     }
@@ -118,12 +118,12 @@ pub struct Block {
 
 impl Block {
     pub fn new(block_type: BlockType) -> Self {
-        return Self {
+        Self {
             id: Uuid::new_v4(),
             block_type,
             block_body: None,
             next: None,
-        };
+        }
     }
 
     pub fn add_next_id(&mut self, next: Uuid) -> &mut Self {
@@ -137,37 +137,37 @@ impl Block {
 
         next_array.push(next);
         self.next = Some(next_array);
-        return self;
+        self
     }
 
     pub fn set_block_body(&mut self, body: BlockBody) -> &mut Self {
         self.block_body = Some(body);
-        return self;
+        self
     }
 
     pub fn get_next_ids(&self) -> &Option<Vec<Uuid>> {
-        return &self.next;
+        &self.next
     }
 
     pub fn get_body(&self) -> &Option<BlockBody> {
-        return &self.block_body;
+        &self.block_body
     }
     pub fn get_block_type(&self) -> &BlockType {
-        return &self.block_type;
+        &self.block_type
     }
 }
 
 impl BlockExecutorTrait for Block {
     fn get_id(&self) -> &Uuid {
-        return &self.id;
+        &self.id
     }
     fn execute(&self, input: Option<String>) -> Result<Option<String>, ExecutorError> {
-        return match self.block_body.clone() {
+        match self.block_body.clone() {
             None => Err(ExecutorError::NotImplemented("test".to_string())),
             Some(BlockBody::AI(body)) => execute_ai(input, body),
             Some(BlockBody::CRON(body)) => execute_cron(input, body),
             Some(BlockBody::FILE(body)) => execute_file(input, body),
-        };
+        }
     }
 }
 
@@ -188,7 +188,7 @@ mod test {
             assert_eq!(block_body.prompt, "Hi".to_string());
             assert_eq!(block_body.provider, AIProvider::OpenAi);
         } else {
-            return assert!(false);
+            panic!("No block available in create new AI");
         };
 
         assert!(!block.id.is_nil());
@@ -206,7 +206,7 @@ mod test {
         if let Some(BlockBody::CRON(block_body)) = block.block_body {
             assert_eq!(block_body.cron, "* * * * * * *".to_string());
         } else {
-            return assert!(false);
+            panic!("No block available in create new CRON");
         };
 
         assert!(!block.id.is_nil());
@@ -235,7 +235,7 @@ mod test {
             assert_eq!(block_body.location, "dir".to_string());
             assert_eq!(block_body.file_name, "test".to_string());
         } else {
-            return assert!(false);
+            panic!("No block available in create new FILE");
         };
 
         assert!(!block.id.is_nil());
