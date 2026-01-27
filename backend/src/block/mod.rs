@@ -4,6 +4,7 @@ pub mod cron;
 mod executor_error;
 pub mod file;
 pub mod utils;
+pub mod email;
 use uuid::Uuid;
 
 use executor_error::ExecutorError;
@@ -12,11 +13,14 @@ use ai::{AIBlockBody, execute_ai};
 use cron::{CronBlockBody, execute_cron};
 use file::{FileBlockBody, execute_file};
 
+use crate::block::email::{EmailBlockBody, execute_email};
+
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum BlockType {
     AI,
     CRON,
     FILE,
+    EMAIL
 }
 
 impl fmt::Display for BlockType {
@@ -35,6 +39,7 @@ pub enum BlockBody {
     AI(AIBlockBody),
     FILE(FileBlockBody),
     CRON(CronBlockBody),
+    EMAIL(EmailBlockBody),
 }
 
 #[derive(Debug, Clone)]
@@ -72,10 +77,12 @@ impl BlockExecutorTrait for Block {
     }
     fn execute(&self, input: Option<String>) -> Result<Option<String>, ExecutorError> {
         match self.block_body.clone() {
-            None => Err(ExecutorError::NotImplemented("test".to_string())),
             Some(BlockBody::AI(body)) => execute_ai(input, body),
             Some(BlockBody::CRON(body)) => execute_cron(input, body),
             Some(BlockBody::FILE(body)) => execute_file(input, body),
+            Some(BlockBody::EMAIL(body)) => execute_email(input, body),
+            _ => Err(ExecutorError::NotImplemented("test".to_string())),
+
         }
     }
 }

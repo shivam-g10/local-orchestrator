@@ -12,5 +12,11 @@ pub enum ExecutorError {
     FileNotExist(String),
     #[error("AI API Error {0}")]
     AiApiError(reqwest::Error),
+    #[error("Email input missing")]
+    EmailInputNotFound,
+    #[error("Error connecting to email SMTP")]
+    EmailConnectionError,
+    #[error("Error sending email: {0}")]
+    EmailSendError(Box<dyn std::error::Error>),
 }
 
