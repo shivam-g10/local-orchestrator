@@ -1,5 +1,5 @@
 use backend::{
-    block::{AIProvider, BlockExecutorTrait, FileOperationType, utils::*},
+    block::{BlockExecutorTrait, utils::*},
     config, logger,
     workflow::Workflow,
 };
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Cron
     let mut flow = Workflow::new();
-    let cron_block_result = create_cron_block("* * * * * * *");
+    let cron_block_result = cron_utils::create_cron_block("* * * * * * *");
     let cron_block = match cron_block_result {
         Err(e) => return Err(Box::new(e)),
         Ok(block) => block,
@@ -30,8 +30,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dt_str = dt_new.to_string();
     flow.register_block(cron_block.clone());
 
-    let ai_search_block = create_ai_block(
-        AIProvider::OpenAi,
+    let ai_search_block: backend::block::Block = ai_utils::create_ai_block(
+        ai_utils::AIProvider::OpenAi,
         &api_key,
         &format!(
             "Find latest news related to Rust. Give me full information based on what you know. Don't ask me questions. Upto 500 words. Make sure to keep it data dense. Current ISO Time: {}",
@@ -40,14 +40,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     flow.register_block(ai_search_block.clone());
 
-    let ai_report = create_ai_block(
-        AIProvider::OpenAi,
+    let ai_report = ai_utils::create_ai_block(
+        ai_utils::AIProvider::OpenAi,
         &api_key,
         "Don't ask questions or follow up. Just do the work. Format this into a good full executive summary after validating infomation: ###INPUT",
     );
     flow.register_block(ai_report.clone());
 
-    let file_save_block = create_file_block(FileOperationType::WRITE, "~/", "test.md");
+    let file_save_block = file_utils::create_file_block(file_utils::FileOperationType::WRITE, "~/", "test.md");
     flow.register_block(file_save_block.clone());
 
     flow.register_forward_link(&cron_block, &ai_search_block);
