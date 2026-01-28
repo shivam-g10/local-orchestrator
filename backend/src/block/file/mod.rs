@@ -7,6 +7,7 @@ pub use executor::execute_file;
 pub enum FileOperationType {
     READ,
     WRITE,
+    WATCH,
 }
 
 #[derive(Debug, Clone)]
@@ -29,13 +30,13 @@ impl FileBlockBody {
 #[cfg(test)]
 mod test {
 
-    use crate::block::{Block, BlockBody, BlockType};
+    use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 
     use super::*;
 
     #[test]
     fn create_file_block() {
-        let mut block = Block::new(BlockType::FILE);
+        let mut block = Block::new(BlockType::FILE, BlockExecutionType::Response);
         let body = FileBlockBody::new(
             FileOperationType::READ,
             "dir".to_string(),

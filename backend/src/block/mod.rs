@@ -6,6 +6,7 @@ pub mod file;
 pub mod utils;
 pub mod email;
 use uuid::Uuid;
+use crossbeam::channel::Receiver;
 
 use executor_error::ExecutorError;
 
@@ -31,7 +32,9 @@ impl fmt::Display for BlockType {
 
 pub trait BlockExecutorTrait {
     fn get_id(&self) -> &Uuid;
-    fn execute(&self, input: Option<String>) -> Result<Option<String>, ExecutorError>;
+    fn get_execution_type(&self) -> &BlockExecutionType;
+    fn execute(&self, input: Option<String>) -> ExecutionRunResult;
+    fn get_block_type(&self) -> &BlockType;
 }
 
 #[derive(Debug, Clone)]
@@ -43,18 +46,31 @@ pub enum BlockBody {
 }
 
 #[derive(Debug, Clone)]
+pub enum BlockExecutionType {
+    Response,
+    Trigger
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerType {
+    Onshot,
+    Recurring
+}
+
+#[derive(Debug, Clone)]
 pub struct Block {
     id: Uuid,
     block_body: Option<BlockBody>,
     block_type: BlockType,
+    execution_type: BlockExecutionType,
 }
 
 impl Block {
-    pub fn new(block_type: BlockType) -> Self {
+    pub fn new(block_type: BlockType, execution_type: BlockExecutionType) -> Self {
         Self {
             id: Uuid::new_v4(),
             block_type,
             block_body: None,
+            execution_type,
         }
     }
 
@@ -66,16 +82,22 @@ impl Block {
     pub fn get_body(&self) -> &Option<BlockBody> {
         &self.block_body
     }
-    pub fn get_block_type(&self) -> &BlockType {
-        &self.block_type
-    }
 }
 
 impl BlockExecutorTrait for Block {
     fn get_id(&self) -> &Uuid {
         &self.id
     }
-    fn execute(&self, input: Option<String>) -> Result<Option<String>, ExecutorError> {
+
+    fn get_execution_type(&self) -> &BlockExecutionType {
+        &self.execution_type
+    }
+
+    fn get_block_type(&self) -> &BlockType {
+        &self.block_type
+    }
+
+    fn execute(&self, input: Option<String>) -> ExecutionRunResult {
         match self.block_body.clone() {
             Some(BlockBody::AI(body)) => execute_ai(input, body),
             Some(BlockBody::CRON(body)) => execute_cron(input, body),
@@ -86,3 +108,11 @@ impl BlockExecutorTrait for Block {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum ExecutionResult {
+    Trigger(Receiver<Option<String>>, TriggerType),
+    Response(Option<String>)
+}
+
+pub type ExecutionRunResult = Result<Option<ExecutionResult>, ExecutorError>;

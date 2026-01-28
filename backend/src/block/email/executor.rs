@@ -1,8 +1,8 @@
-use crate::{block::executor_error::ExecutorError, logger};
+use crate::{block::{ExecutionRunResult, executor_error::ExecutorError}, logger};
 
 use super::EmailBlockBody;
 
-pub fn execute_email(input: Option<String>, body: EmailBlockBody) -> Result<Option<String>, ExecutorError> {
+pub fn execute_email(input: Option<String>, body: EmailBlockBody) -> ExecutionRunResult {
     let email_content = match input {
         None => return Err(ExecutorError::EmailInputNotFound),
         Some(input) => input,

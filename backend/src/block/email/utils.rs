@@ -1,6 +1,6 @@
 use lettre::address::AddressError;
 
-use crate::block::{Block, BlockType, BlockBody};
+use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 use super::EmailBlockBody;
 
 pub fn create_email_block(
@@ -19,7 +19,7 @@ pub fn create_email_block(
         }
         Ok(body) => body,
     };
-    let mut block = Block::new(BlockType::EMAIL);
+    let mut block = Block::new(BlockType::EMAIL, BlockExecutionType::Response);
     block.set_block_body(BlockBody::EMAIL(body));
     Ok(block)
 }

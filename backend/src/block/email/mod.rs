@@ -38,7 +38,7 @@ mod test {
     use lettre::Address;
 
     use crate::{
-        block::{Block, BlockBody, BlockType},
+        block::{Block, BlockBody, BlockExecutionType, BlockType},
         config,
     };
 
@@ -47,7 +47,7 @@ mod test {
     #[test]
     fn create_new_email_block() {
         config::init();
-        let mut block = Block::new(BlockType::EMAIL);
+        let mut block = Block::new(BlockType::EMAIL, BlockExecutionType::Response);
         let test_email = "test@test.com";
         let test_name = "Test Email";
         let mailbox = Mailbox::new(

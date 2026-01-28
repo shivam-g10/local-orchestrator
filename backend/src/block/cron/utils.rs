@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockType, BlockBody};
+use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 use super::CronBlockBody;
 
 pub fn create_cron_block(cron: &str) -> Result<Block, cron::error::Error> {
@@ -9,7 +9,7 @@ pub fn create_cron_block(cron: &str) -> Result<Block, cron::error::Error> {
         }
         Ok(body) => body,
     };
-    let mut block = Block::new(BlockType::CRON);
+    let mut block = Block::new(BlockType::CRON, BlockExecutionType::Trigger);
     block.set_block_body(BlockBody::CRON(body));
     Ok(block)
 }

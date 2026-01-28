@@ -1,10 +1,10 @@
-use crate::{block::executor_error::ExecutorError, logger};
+use crate::{block::{ExecutionResult, ExecutionRunResult, executor_error::ExecutorError}, logger};
 use super::{FileBlockBody, FileOperationType};
 
 pub fn execute_file(
     input: Option<String>,
     body: FileBlockBody,
-) -> Result<Option<String>, ExecutorError> {
+) -> ExecutionRunResult {
     match std::fs::exists(&body.location) {
         Err(e) => {
             return Err(ExecutorError::FileError(body.location, e));
@@ -39,9 +39,12 @@ pub fn execute_file(
                 }
                 Ok(content) => {
                     logger::info("File read successful");
-                    Ok(Some(content))
+                    Ok(Some(ExecutionResult::Response(Some(content))))
                 }
             }
+        },
+        FileOperationType::WATCH => {
+            Err(ExecutorError::NotImplemented("File Watch not implemented".to_owned()))
         }
     }
 }
@@ -91,7 +94,7 @@ mod test {
             operation: FileOperationType::READ,
         };
         match execute_file(None, body.clone()) {
-            Ok(Some(content)) => {
+            Ok(Some(ExecutionResult::Response(Some(content)))) => {
                 assert!(content.contains("/target"));
             }
             Ok(None) => {
@@ -99,7 +102,8 @@ mod test {
             }
             Err(e) => {
                 panic!("error {e}");
-            }
+            },
+            _ => panic!("unexpected response")
         }
     }
 }

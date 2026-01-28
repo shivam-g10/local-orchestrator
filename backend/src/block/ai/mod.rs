@@ -43,12 +43,12 @@ impl AIBlockBody {
 #[cfg(test)]
 mod test {
 
-    use crate::block::{Block, BlockBody, BlockType};
+    use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 
     use super::*;
     #[test]
     fn create_new_ai_block() {
-        let mut block = Block::new(BlockType::AI);
+        let mut block = Block::new(BlockType::AI, BlockExecutionType::Response);
         let body = AIBlockBody::new(AIProvider::OpenAi, "Hi".to_string(), "ABC".to_string());
         block.set_block_body(BlockBody::AI(body));
         assert_eq!(block.block_type, BlockType::AI);

@@ -29,13 +29,13 @@ impl CronBlockBody {
 #[cfg(test)]
 mod test {
 
-    use crate::block::{Block, BlockBody, BlockType};
+    use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 
     use super::*;
 
     #[test]
     fn create_new_cron_block() {
-        let mut block = Block::new(BlockType::CRON);
+        let mut block = Block::new(BlockType::CRON, BlockExecutionType::Trigger);
         let result = CronBlockBody::new("* * * * * * *".to_string());
         let body: CronBlockBody = result.unwrap();
         block.set_block_body(BlockBody::CRON(body));
