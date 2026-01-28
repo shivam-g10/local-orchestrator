@@ -5,6 +5,9 @@ mod executor_error;
 pub mod file;
 pub mod utils;
 pub mod email;
+mod human;
+mod delay;
+
 use uuid::Uuid;
 use crossbeam::channel::Receiver;
 
@@ -13,15 +16,18 @@ use executor_error::ExecutorError;
 use ai::{AIBlockBody, execute_ai};
 use cron::{CronBlockBody, execute_cron};
 use file::{FileBlockBody, execute_file};
-
-use crate::block::email::{EmailBlockBody, execute_email};
+use email::{EmailBlockBody, execute_email};
+use human::{HumanBlockBody, execute_human, submit_form};
+use delay::{DelayBlockBody, execute_delay};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum BlockType {
     AI,
     CRON,
     FILE,
-    EMAIL
+    EMAIL,
+    HUMAN,
+    DELAY,
 }
 
 impl fmt::Display for BlockType {
@@ -43,6 +49,8 @@ pub enum BlockBody {
     FILE(FileBlockBody),
     CRON(CronBlockBody),
     EMAIL(EmailBlockBody),
+    HUMAN(HumanBlockBody),
+    DELAY(DelayBlockBody),
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +60,7 @@ pub enum BlockExecutionType {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerType {
-    Onshot,
+    OneShot,
     Recurring
 }
 
@@ -103,6 +111,8 @@ impl BlockExecutorTrait for Block {
             Some(BlockBody::CRON(body)) => execute_cron(input, body),
             Some(BlockBody::FILE(body)) => execute_file(input, body),
             Some(BlockBody::EMAIL(body)) => execute_email(input, body),
+            Some(BlockBody::HUMAN(body)) => execute_human(input, body),
+            Some(BlockBody::DELAY(body)) => execute_delay(input, body),
             _ => Err(ExecutorError::NotImplemented("test".to_string())),
 
         }

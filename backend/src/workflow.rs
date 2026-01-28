@@ -112,6 +112,11 @@ impl Workflow {
                                                 "Received message: {:#?}",
                                                 &msg
                                             ));
+                                            if trigger_type != TriggerType::OneShot {
+                                                logger::debug("One shot trigger exiting");
+                                                previous_result = msg;
+                                                break;
+                                            }
                                             let links = match self.links.get(&next_block) {
                                                 None => &Vec::new(),
                                                 Some(l) => l,
@@ -124,10 +129,6 @@ impl Workflow {
                                                 logger::info(
                                                     "Exiting trigger loop due to no next item",
                                                 );
-                                                break;
-                                            }
-
-                                            if trigger_type == TriggerType::Onshot {
                                                 break;
                                             }
                                         }

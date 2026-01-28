@@ -10,23 +10,18 @@ pub fn rust_note_workflow() -> Result<(), Box<dyn Error>> {
 
     // Cron
     let mut flow = Workflow::new();
-    let cron_block_result = cron_utils::create_cron_block("* * * * * * *");
-    let cron_block = match cron_block_result {
-        Err(e) => return Err(Box::new(e)),
-        Ok(block) => block,
-    };
+
     let dt = chrono::Local::now();
     let naive_utc = dt.naive_utc();
     let offset = dt.offset();
     let dt_new = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(naive_utc, *offset);
     let dt_str = dt_new.to_string();
-    flow.register_block(cron_block.clone());
 
     let ai_search_block: Block = ai_utils::create_ai_block(
         ai_utils::AIProvider::OpenAi,
         &api_key,
         &format!(
-            "Find latest news related to Rust. Give me full information based on what you know. Don't ask me questions. Upto 500 words. Make sure to keep it data dense. Current ISO Time: {}",
+            "Find latest news related to AI Evals. Give me full information based on what you know. Don't ask me questions. Upto 500 words. Make sure to keep it data dense. Current ISO Time: {}",
             dt_str
         ),
     );
@@ -53,10 +48,9 @@ pub fn rust_note_workflow() -> Result<(), Box<dyn Error>> {
     );
     flow.register_block(file_save_block.clone());
 
-    flow.register_forward_link(&cron_block, &ai_search_block);
     flow.register_forward_link(&ai_search_block, &ai_report);
     flow.register_forward_link(&ai_report, &file_save_block);
 
-    flow.execute(*cron_block.get_id(), None);
+    flow.execute(*ai_search_block.get_id(), None);
     Ok(())
 }
