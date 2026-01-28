@@ -12,7 +12,7 @@ pub fn rust_social_workflow() -> Result<(), Box<dyn Error>> {
 
     // Cron
     let mut flow = Workflow::new();
-    let cron_block_result = cron_utils::create_cron_block("* */5 * * * * *");
+    let cron_block_result = cron_utils::create_cron_block("0 */5 * * * * *");
     let cron_block = match cron_block_result {
         Err(e) => return Err(Box::new(e)),
         Ok(block) => block,
