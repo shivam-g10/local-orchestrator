@@ -1,0 +1,10 @@
+[package]
+name = "orchestrator-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+orchestrator-core = { version = "0.1.0", path = "../orchestrator-core" }
+uuid = "1.20.0"

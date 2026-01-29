@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["crates/orchestrator-core", "crates/orchestrator-examples", "./poc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"

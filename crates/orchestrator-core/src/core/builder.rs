@@ -1,0 +1,85 @@
+use uuid::Uuid;
+
+use crate::block::BlockConfig;
+use super::{NodeDef, WorkflowDefinition};
+
+/// Fluent builder for WorkflowDefinition. Uses strongly-typed BlockConfig only.
+#[derive(Debug, Default)]
+pub struct WorkflowDefinitionBuilder {
+    id: Uuid,
+    nodes: std::collections::HashMap<Uuid, NodeDef>,
+    edges: Vec<(Uuid, Uuid)>,
+    entry: Option<Uuid>,
+}
+
+impl WorkflowDefinitionBuilder {
+    pub fn new() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+            entry: None,
+        }
+    }
+
+    pub fn add_node(mut self, id: Uuid, config: BlockConfig) -> Self {
+        self.nodes.insert(id, NodeDef { config });
+        self
+    }
+
+    pub fn add_edge(mut self, from: Uuid, to: Uuid) -> Self {
+        self.edges.push((from, to));
+        self
+    }
+
+    pub fn set_entry(mut self, entry: Uuid) -> Self {
+        self.entry = Some(entry);
+        self
+    }
+
+    pub fn build(self) -> WorkflowDefinition {
+        WorkflowDefinition {
+            id: self.id,
+            nodes: self.nodes,
+            edges: self.edges,
+            entry: self.entry,
+        }
+    }
+}
+
+impl WorkflowDefinition {
+    pub fn builder() -> WorkflowDefinitionBuilder {
+        WorkflowDefinitionBuilder::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{BlockConfig, FileReadConfig};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[test]
+    fn builder_builds_definition_with_nodes_and_edges() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let def = WorkflowDefinition::builder()
+            .add_node(a, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("a.txt")))))
+            .add_node(b, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("b.txt")))))
+            .add_node(c, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("c.txt")))))
+            .add_edge(a, b)
+            .add_edge(b, c)
+            .set_entry(a)
+            .build();
+
+        assert_eq!(def.nodes().len(), 3);
+        assert_eq!(def.edges().len(), 2);
+        assert_eq!(def.entry(), Some(&a));
+        assert!(def.nodes().get(&a).is_some());
+        assert_eq!(def.nodes().get(&a).unwrap().config.block_type(), "file_read");
+        assert!(def.edges().contains(&(a, b)));
+        assert!(def.edges().contains(&(b, c)));
+    }
+}

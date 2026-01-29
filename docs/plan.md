@@ -64,20 +64,27 @@ flowchart LR
 ## Demonstration rule
 
 - Each phase ends with a working demo that can be run locally.
-- Demos live as sample workflows in a new `examples/` folder, with a minimal run command or UI path documented.
+- Demos live as sample workflows in `crates/orchestrator-examples/`, with a minimal run command or UI path documented.
+
+## User-facing API focus
+
+- Users build workflows via `Workflow::new()`, `add(Block)`, `link(BlockId, BlockId)`, and `run()`.
+- Blocks are created with strong configs; optional config (like file path) can be provided now or supplied at run time via input.
+- The public surface stays at this level; `WorkflowDefinition`, `WorkflowRun`, `BlockRegistry`, and `runtime` remain internal.
+- The user focus is on blocks, their configuration, and linking them into a workflow.
 
 ## Phase 1: Async core + typed IO (Rust library)
 
 - Define `WorkflowDefinition` (nodes, edges, ports, conditions) and `WorkflowRun` state machine; refactor [backend/src/workflow.rs](backend/src/workflow.rs).
 - Replace `Option<String>` IO with typed `BlockInput`/`BlockOutput` enums (serde-able, versioned); refactor [backend/src/block/mod.rs](backend/src/block/mod.rs) and modules under [backend/src/block/](backend/src/block/).
 - Implement async scheduler with parallel edges, multiple-next execution, cycle handling (iteration budget + run tokens), and concurrency controls.
-- Build an ergonomic builder API and a registry for custom blocks.
+- Build internal definition/builder and block registry while exposing a minimal build-and-run API (`Workflow`, `Block`, `BlockId`).
 - Demo: parallel + cyclic workflow executed via `cargo run`, no UI required.
 
 ## Phase 2: Block SDK + sample runner
 
 - Create a simple block SDK: base trait, input/output helpers, error types, and block template docs.
-- Add a minimal sample runner/CLI for `cargo run` to execute sample workflows in [backend/src/sample_wf/](backend/src/sample_wf/) or `examples/`.
+- Add a minimal sample runner/CLI for `cargo run` to execute sample workflows using the `Workflow`/`Block` API.
 - Demo: add a new custom block in <30 minutes and run a sample workflow using it.
 
 ## Phase 3: AI harness upgrades
