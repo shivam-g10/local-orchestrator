@@ -247,7 +247,7 @@ impl FsTools {
                 .map(|s| s.to_lowercase());
             *by_extension.entry(ext.clone().unwrap_or_default()).or_insert(0) += 1;
 
-            let modified_utc = md.modified().ok().map(|t| DateTime::<Utc>::from(t));
+            let modified_utc = md.modified().ok().map(DateTime::<Utc>::from);
             let hash8 = hash_prefix(path, 4096).ok();
 
             nodes.push(FileNode {
@@ -310,7 +310,7 @@ impl FsTools {
         let n = f.read(&mut buf)?;
         buf.truncate(n);
 
-        if buf.iter().any(|b| *b == 0) {
+        if buf.contains(&0) {
             return Err(anyhow!("binary file (NUL byte detected): {}", canon.display()));
         }
         let s = std::str::from_utf8(&buf).context("not UTF-8")?;
@@ -571,7 +571,7 @@ fn is_binary_prefix(path: &Path, max_bytes: usize) -> bool {
         Err(_) => return true,
     };
     buf.truncate(n);
-    buf.iter().any(|b| *b == 0)
+    buf.contains(&0)
 }
 
 fn detect_signals(files: &BTreeSet<String>) -> Vec<String> {
@@ -649,7 +649,7 @@ fn read_head_text(path: PathBuf, max_bytes: usize) -> Option<(bool, String)> {
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
 
-    if buf.iter().any(|b| *b == 0) {
+    if buf.contains(&0) {
         return None;
     }
     let s = std::str::from_utf8(&buf).ok()?;

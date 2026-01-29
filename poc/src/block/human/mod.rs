@@ -4,7 +4,6 @@ mod executor;
 pub mod utils;
 
 pub use executor::execute_human;
-pub use executor::submit_form;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

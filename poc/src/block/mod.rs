@@ -17,7 +17,7 @@ use ai::{AIBlockBody, execute_ai};
 use cron::{CronBlockBody, execute_cron};
 use file::{FileBlockBody, execute_file};
 use email::{EmailBlockBody, execute_email};
-use human::{HumanBlockBody, execute_human, submit_form};
+use human::{HumanBlockBody, execute_human};
 use delay::{DelayBlockBody, execute_delay};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
