@@ -12,6 +12,8 @@ pub enum ExecutorError {
     FileNotExist(String),
     #[error("AI API Error {0}")]
     AiApiError(reqwest::Error),
+    #[error("AI FS Error {0}")]
+    AiFsError(anyhow::Error),
     #[error("Email input missing")]
     EmailInputNotFound,
     #[error("Error connecting to email SMTP")]

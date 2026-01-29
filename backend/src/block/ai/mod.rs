@@ -1,18 +1,22 @@
 mod executor;
 pub mod utils;
 mod open_ai;
+mod fs_tools;
 pub use executor::execute_ai;
+
+use crate::block::ai::fs_tools::FsTools;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AIProvider {
     OpenAi,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct AIBlockBody {
     pub provider: AIProvider,
     pub prompt: String,
     pub api_key: String,
+    pub fs_tools: Option<FsTools>,
 }
 impl AIBlockBody {
     pub fn new(provider: AIProvider, prompt: String, api_key: String) -> Self {
@@ -20,6 +24,7 @@ impl AIBlockBody {
             provider,
             prompt,
             api_key,
+            fs_tools: None,
         }
     }
 
@@ -34,6 +39,11 @@ impl AIBlockBody {
     }
     pub fn set_api_key(&mut self, api_key: String) -> &mut Self {
         self.api_key = api_key;
+        self
+    }
+
+    pub fn set_fs_tools(&mut self, fs_tools: Option<FsTools>) -> &mut Self {
+        self.fs_tools = fs_tools;
         self
     }
 }
