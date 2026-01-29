@@ -143,6 +143,13 @@ flowchart LR
 
 ## Cross-cutting quality rules
 
-- Prefer strong types over ad-hoc strings; keep modules small and cohesive.
+- Prefer strong types over ad-hoc strings or `serde_json::Value`.
+- Keep modules small and cohesive; split large files early.
+- Separate conceptual concerns at high levels (core, blocks, runtime, storage).
 - Favor conventions and simple patterns over heavy abstractions.
+- Prefer explicit, copyable boilerplate over complex generic type tricks.
+- Do more with less: prefer fewer lines when clarity is equal.
+- Prioritize ergonomics and ease of use in the public API.
+- Use clear, unambiguous names for types, modules, and workflows.
+- Add unit tests where behavior is non-trivial or regressions are likely.
 - Treat demo workflows as first-class artifacts and keep them runnable.
