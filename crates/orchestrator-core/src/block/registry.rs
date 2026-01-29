@@ -18,10 +18,12 @@ impl BlockRegistry {
         }
     }
 
-    /// Registry with built-in blocks (e.g. file_read) registered.
+    /// Registry with built-in blocks (e.g. file_read, file_write, echo) registered.
     pub fn default_with_builtins() -> Self {
         let mut r = Self::new();
         super::file_read::register_file_read(&mut r);
+        super::file_write::register_file_write(&mut r);
+        super::echo::register_echo(&mut r);
         r
     }
 

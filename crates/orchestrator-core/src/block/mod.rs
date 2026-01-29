@@ -108,9 +108,13 @@ mod tests {
 }
 
 pub mod config;
+pub mod echo;
 pub mod file_read;
+pub mod file_write;
 pub mod registry;
 
 pub use config::BlockConfig;
+pub use echo::{register_echo, EchoBlock, EchoConfig};
 pub use file_read::{register_file_read, FileReadBlock, FileReadConfig};
+pub use file_write::{register_file_write, FileWriteBlock, FileWriteConfig};
 pub use registry::BlockRegistry;

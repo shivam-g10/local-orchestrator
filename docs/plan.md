@@ -81,6 +81,15 @@ flowchart LR
 - Build internal definition/builder and block registry while exposing a minimal build-and-run API (`Workflow`, `Block`, `BlockId`).
 - Demo: parallel + cyclic workflow executed via `cargo run`, no UI required.
 
+### Phase 1: Workflow output resolution (decisions)
+
+How the runtime chooses which block’s output to return as the workflow result (priority order):
+
+1. **User-designated output block** (future): If the workflow has `output_block: Option<Uuid>` set (e.g. via `set_output_block(BlockId)`), return that block’s output. The designated block need not be a sink.
+2. **Single sink**: If there is exactly one block with no outgoing edges, return that block’s output.
+3. **Last link**: If there are multiple sinks and no designated output, use the sink that is the destination of the last link (last edge’s `to`). If that node is not a sink, fall back to the first sink by sorted Uuid (deterministic).
+4. **Last executed (implemented)**: If none of the above yield an available output (e.g. in iteration mode the primary sink never ran), return the output of the **last block to complete execution**. The runtime tracks `last_completed_id` in both DAG execution (`run_workflow`) and iteration execution (`run_workflow_iteration`); when resolving the result it prefers the primary sink’s output, then falls back to `last_completed_id`’s output.
+
 ## Phase 2: Block SDK + sample runner
 
 - Create a simple block SDK: base trait, input/output helpers, error types, and block template docs.

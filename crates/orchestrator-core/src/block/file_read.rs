@@ -51,9 +51,9 @@ impl BlockExecutor for FileReadBlock {
 
 /// Register the file_read block in the given registry. Config is strongly-typed BlockConfig.
 pub fn register_file_read(registry: &mut crate::block::BlockRegistry) {
-    registry.register("file_read", |config| {
-        let crate::block::BlockConfig::FileRead(c) = config;
-        Ok(Box::new(FileReadBlock::new(c)))
+    registry.register("file_read", |config| match config {
+        crate::block::BlockConfig::FileRead(c) => Ok(Box::new(FileReadBlock::new(c))),
+        _ => Err(BlockError::Other("expected FileRead config".into())),
     });
 }
 

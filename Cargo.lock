@@ -1133,6 +1133,7 @@ name = "orchestrator-examples"
 version = "0.1.0"
 dependencies = [
  "orchestrator-core",
+ "tempfile",
  "uuid",
 ]
 
