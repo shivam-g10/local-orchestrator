@@ -427,8 +427,8 @@ mod test {
         let policy = FsPolicy::new(".").expect("FsPolicy::new failed");
         let fs = FsTools::new(policy).expect("FsTools::new failed");
 
-        // le/t prompt = "Summarize this folder. Start by calling fs_folder_digest(root=\".\"). Then give a short summary.";
-        let prompt = "Extract all useful information from this current directory '.'. Make sure to keep it data dense.";
+        let prompt = "Summarize this folder. Start by calling fs_folder_digest(root=\".\"). Then give a short summary.";
+        // let prompt = "Extract all useful information from this current directory '.'. Make sure to keep it data dense.";
         let result = get_ai_response_with_fs(&api_key, prompt, &fs);
 
         match result {

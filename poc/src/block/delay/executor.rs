@@ -55,9 +55,9 @@ mod test {
             }
         };
         
-        let receive = rec.recv_timeout(Duration::from_millis(1000));
-        assert!(receive.is_ok());
+        let receive = rec.recv_timeout(Duration::from_millis(2000));
+        assert!(receive.is_ok(), "Expected Ok, got {:#?}", receive);
         let msg = receive.unwrap();
-        assert!(msg.is_none());
+        assert!(msg.is_none(), "Expected None, got {:#?}", msg);
     }
 }

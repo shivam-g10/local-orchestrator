@@ -127,8 +127,8 @@ mod test {
     use super::*;
 
     #[test]
-    fn create_file_block() {
-        let mut block = Block::new(BlockType::FILE, BlockExecutionType::Trigger);
+    fn create_human_block() {
+        let mut block = Block::new(BlockType::HUMAN, BlockExecutionType::Trigger);
         let body = HumanBlockBody::new(
             HumanBlockType::Play,
         );
@@ -139,7 +139,7 @@ mod test {
             assert_eq!(block_body.human_block_type, HumanBlockType::Play);
             assert_eq!(block_body.form_config, None);
         } else {
-            panic!("No block available in create new FILE");
+            panic!("No block available in create new HUMAN block");
         };
 
         assert!(!block.id.is_nil());
