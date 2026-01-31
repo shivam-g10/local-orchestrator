@@ -4,6 +4,7 @@ use orchestrator_core::{Block, RunError, Workflow};
 
 /// Build and run the print-readme workflow: file_read(path) -> echo.
 /// Returns the sink (echo) output or an error.
+#[allow(dead_code)]
 pub fn print_readme_workflow(path: &str) -> Result<String, RunError> {
     let mut w = Workflow::new();
     w.add(Block::file_read(Some(path)));

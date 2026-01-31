@@ -2,19 +2,24 @@ use std::collections::HashMap;
 
 use super::{BlockConfig, BlockExecutor, BlockError};
 
-/// Factory that builds a block instance from strongly-typed config.
+/// Factory that builds a block instance from strongly-typed config (builtin blocks).
 pub type BlockFactory = Box<dyn Fn(BlockConfig) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync>;
 
-/// Registry: block type name -> factory. No serde_json::Value; config is BlockConfig.
+/// Factory that builds a block instance from serialized config (custom blocks registered from outside the crate).
+pub type CustomBlockFactory = Box<dyn Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync>;
+
+/// Registry: block type name -> factory. Builtin blocks use typed `BlockConfig`; custom blocks use `register_custom` and pass serialized config.
 #[derive(Default)]
 pub struct BlockRegistry {
     factories: HashMap<String, BlockFactory>,
+    custom_factories: HashMap<String, CustomBlockFactory>,
 }
 
 impl BlockRegistry {
     pub fn new() -> Self {
         Self {
             factories: HashMap::new(),
+            custom_factories: HashMap::new(),
         }
     }
 
@@ -27,6 +32,7 @@ impl BlockRegistry {
         r
     }
 
+    /// Register a builtin block type. Use [`register_custom`](BlockRegistry::register_custom) for blocks defined outside this crate.
     pub fn register(
         &mut self,
         block_type: impl Into<String>,
@@ -35,19 +41,36 @@ impl BlockRegistry {
         self.factories.insert(block_type.into(), Box::new(factory));
     }
 
+    /// Register a custom block type from outside the crate. The factory receives the config as deserialized `serde_json::Value`; the user passes typed config via [`Workflow::add_custom`](crate::workflow::Workflow::add_custom).
+    pub fn register_custom(
+        &mut self,
+        type_id: impl Into<String>,
+        factory: impl Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync + 'static,
+    ) {
+        self.custom_factories.insert(type_id.into(), Box::new(factory));
+    }
+
     pub fn get(&self, config: &BlockConfig) -> Result<Box<dyn BlockExecutor>, BlockError> {
         let block_type = config.block_type();
-        self.factories
-            .get(block_type)
-            .ok_or_else(|| BlockError::Other(format!("unknown block type: {}", block_type)))
-            .and_then(|f| f(config.clone()))
+        match config {
+            BlockConfig::Custom { payload, .. } => self
+                .custom_factories
+                .get(block_type)
+                .ok_or_else(|| BlockError::Other(format!("unknown custom block type: {}", block_type)))
+                .and_then(|f| f(payload.clone())),
+            _ => self
+                .factories
+                .get(block_type)
+                .ok_or_else(|| BlockError::Other(format!("unknown block type: {}", block_type)))
+                .and_then(|f| f(config.clone())),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockConfig, BlockInput, FileReadConfig};
+    use crate::block::{BlockConfig, BlockExecutor, BlockInput, BlockOutput, FileReadConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -66,5 +89,45 @@ mod tests {
         assert!(block.is_ok());
         let out = block.unwrap().execute(BlockInput::empty());
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn register_custom_resolves_and_executes() {
+        use serde_json::json;
+
+        let mut r = BlockRegistry::default_with_builtins();
+        r.register_custom("uppercase", |payload| {
+            let prefix: String = payload
+                .get("prefix")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Box::new(UpperBlock { prefix }))
+        });
+
+        let config = BlockConfig::Custom {
+            type_id: "uppercase".to_string(),
+            payload: json!({"prefix": "out:"}),
+        };
+        let block = r.get(&config).unwrap();
+        let out = block.execute(BlockInput::String("hello".into()));
+        assert!(out.is_ok());
+        let s: Option<String> = out.unwrap().into();
+        assert_eq!(s, Some("out:HELLO".to_string()));
+    }
+
+    struct UpperBlock {
+        prefix: String,
+    }
+    impl BlockExecutor for UpperBlock {
+        fn execute(&self, input: crate::block::BlockInput) -> Result<BlockOutput, BlockError> {
+            let s = match &input {
+                crate::block::BlockInput::String(t) => t.to_uppercase(),
+                crate::block::BlockInput::Empty => String::new(),
+            };
+            Ok(BlockOutput::String {
+                value: format!("{}{}", self.prefix, s),
+            })
+        }
     }
 }

@@ -2,26 +2,16 @@
 
 mod workflows;
 
-use crate::workflows::{
-    copy_files_workflow, print_readme_workflow, single_file_read_workflow,
-};
+use crate::workflows::expense_report;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Example: single_file_read (README.md) ===\n");
-    let content = single_file_read_workflow("README.md")?;
-    println!("{}\n", content);
-
-    println!("=== Example: print_readme (file_read -> echo) ===\n");
-    let content = print_readme_workflow("README.md")?;
-    println!("{}\n", content);
-
-    println!("=== Example: copy_files (parallel read -> write chains) ===\n");
-    let out_dir = std::path::PathBuf::from("./out");
-    copy_files_workflow(&[
-        ("Cargo.toml", out_dir.join("Cargo.toml").to_str().unwrap()),
-        ("LICENSE", out_dir.join("LICENSE").to_str().unwrap()),
-    ])?;
-    println!("Copied Cargo.toml and LICENSE to {:?}\n", out_dir);
-
+    println!("=== Personal finance: where is the money going? ===\n");
+    let statement_path = expense_report::default_statement_path();
+    let out_path = std::path::Path::new("./expense_report.xlsx");
+    let written = expense_report::run_expense_report_workflow(&statement_path, out_path)?;
+    println!(
+        "Expense report written to {}.\n  Open it to see spending by category and monthly totals.",
+        written.display()
+    );
     Ok(())
 }

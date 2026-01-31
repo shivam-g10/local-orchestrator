@@ -3,6 +3,7 @@
 use orchestrator_core::{Block, RunError, Workflow};
 
 /// Build and run a workflow that reads a single file. Returns the file contents or an error.
+#[allow(dead_code)]
 pub fn single_file_read_workflow(path: &str) -> Result<String, RunError> {
     let mut w = Workflow::new();
     w.add(Block::file_read(Some(path)));

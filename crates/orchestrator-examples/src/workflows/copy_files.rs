@@ -6,6 +6,7 @@ use orchestrator_core::{Block, RunError, Workflow};
 
 /// Copy files in parallel: for each (src_path, dst_path) pair, read src and write to dst.
 /// Returns Ok(()) on success; the workflow result is the last sink output (often empty from write).
+#[allow(dead_code)]
 pub fn copy_files_workflow(pairs: &[(&str, &str)]) -> Result<(), RunError> {
     if pairs.is_empty() {
         return Ok(());

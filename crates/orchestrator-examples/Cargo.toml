@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 orchestrator-core = { version = "0.1.0", path = "../orchestrator-core" }
+polars = { version = "0.52", default-features = false, features = ["csv", "dtype-full"] }
+polars_excel_writer = "0.22"
+serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 uuid = "1.20.0"
 

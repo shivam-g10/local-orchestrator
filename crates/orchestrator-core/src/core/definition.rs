@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// A single node in a workflow: strongly-typed block config (no ad-hoc strings or Value).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A single node in a workflow: strongly-typed block config (no ad-hoc strings or Value in public API).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeDef {
     pub config: BlockConfig,
 }
 
 /// Workflow definition: nodes, edges, and optional entry node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowDefinition {
     pub id: Uuid,
     /// Node id -> node definition (block type + config).

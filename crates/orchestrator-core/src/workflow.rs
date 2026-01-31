@@ -1,7 +1,8 @@
-//! Minimal user-facing API: Workflow, Block, BlockId, add/link/run.
+//! Minimal user-facing API: Workflow, Block, BlockId, add/link/run. Use [`Workflow::with_registry`] and [`Workflow::add_custom`] to run custom blocks from outside the crate.
 
 use std::collections::HashMap;
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::block::{BlockConfig, BlockOutput, BlockRegistry, EchoConfig, FileReadConfig, FileWriteConfig};
@@ -77,6 +78,17 @@ impl Workflow {
         }
     }
 
+    /// Create an empty workflow using the given registry (e.g. builtins plus custom blocks). Use [`add_custom`](Workflow::add_custom) to add custom blocks.
+    pub fn with_registry(registry: BlockRegistry) -> Self {
+        Self {
+            def_id: Uuid::new_v4(),
+            nodes: HashMap::new(),
+            edges: Vec::new(),
+            entry: None,
+            registry,
+        }
+    }
+
     /// Add a block to the workflow. Returns its [`BlockId`] for linking. First block added becomes the entry.
     pub fn add(&mut self, block: Block) -> BlockId {
         let id = Uuid::new_v4();
@@ -85,6 +97,27 @@ impl Workflow {
         }
         self.nodes.insert(id, block.into_config());
         BlockId(id)
+    }
+
+    /// Add a custom block (registered from outside the crate). Pass the same `type_id` used in [`BlockRegistry::register_custom`](crate::block::BlockRegistry::register_custom) and a config that implements `Serialize`. Returns its [`BlockId`] for linking. First block added (by `add` or `add_custom`) becomes the entry.
+    /// Returns [`BlockError::Other`] if `type_id` is empty or if config serialization fails.
+    pub fn add_custom(&mut self, type_id: &str, config: impl Serialize) -> Result<BlockId, crate::block::BlockError> {
+        if type_id.trim().is_empty() {
+            return Err(crate::block::BlockError::Other("type_id must be non-empty".into()));
+        }
+        let payload = serde_json::to_value(config).map_err(|e| crate::block::BlockError::Other(e.to_string()))?;
+        let id = Uuid::new_v4();
+        if self.entry.is_none() {
+            self.entry = Some(id);
+        }
+        self.nodes.insert(
+            id,
+            BlockConfig::Custom {
+                type_id: type_id.to_string(),
+                payload,
+            },
+        );
+        Ok(BlockId(id))
     }
 
     /// Link output of `from` to input of `to`. Optional for single-block workflows.
@@ -182,5 +215,73 @@ mod tests {
         let output = w.run().unwrap();
         let s: Option<String> = output.into();
         assert_eq!(s, Some("hello from chain".to_string()));
+    }
+
+    #[test]
+    fn workflow_with_registry_add_custom_runs() {
+        use crate::block::{BlockExecutor, BlockInput, BlockOutput};
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct UppercaseConfig {
+            prefix: String,
+        }
+
+        struct UppercaseBlock {
+            prefix: String,
+        }
+        impl BlockExecutor for UppercaseBlock {
+            fn execute(&self, input: BlockInput) -> Result<BlockOutput, crate::block::BlockError> {
+                let s = match &input {
+                    BlockInput::String(t) => t.to_uppercase(),
+                    BlockInput::Empty => String::new(),
+                };
+                Ok(BlockOutput::String {
+                    value: format!("{}{}", self.prefix, s),
+                })
+            }
+        }
+
+        let mut registry = BlockRegistry::default_with_builtins();
+        registry.register_custom("uppercase", |payload| {
+            let prefix = payload
+                .get("prefix")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Box::new(UppercaseBlock { prefix }))
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        let mut w = Workflow::with_registry(registry);
+        let read_id = w.add(Block::file_read(Some(path_str)));
+        let upper_id = w.add_custom("uppercase", UppercaseConfig { prefix: ">> ".to_string() }).unwrap();
+        w.link(read_id, upper_id);
+
+        let output = w.run().unwrap();
+        let s: Option<String> = output.into();
+        assert_eq!(s, Some(">> HELLO".to_string()));
+    }
+
+    #[test]
+    fn add_custom_empty_type_id_returns_error() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct DummyConfig {
+            key: String,
+        }
+
+        let mut registry = BlockRegistry::default_with_builtins();
+        registry.register_custom("x", |_| Err(crate::block::BlockError::Other("".into())));
+        let mut w = Workflow::with_registry(registry);
+        let err = w.add_custom("", DummyConfig { key: "".into() });
+        assert!(err.is_err());
+        let err = w.add_custom("   ", DummyConfig { key: "".into() });
+        assert!(err.is_err());
     }
 }

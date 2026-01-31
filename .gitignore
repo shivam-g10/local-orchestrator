@@ -1,3 +1,6 @@
 /target
 .env
 /out
+expense_report.xlsx
+stock_report.xlsx
+~*
