@@ -75,11 +75,13 @@ flowchart LR
 
 ## Phase 1: Async core + typed IO (Rust library)
 
-- Define `WorkflowDefinition` (nodes, edges, ports, conditions) and `WorkflowRun` state machine; refactor [backend/src/workflow.rs](backend/src/workflow.rs).
-- Replace `Option<String>` IO with typed `BlockInput`/`BlockOutput` enums (serde-able, versioned); refactor [backend/src/block/mod.rs](backend/src/block/mod.rs) and modules under [backend/src/block/](backend/src/block/).
+- Define `WorkflowDefinition` (nodes, edges; ports/conditions deferred) and `WorkflowRun` state machine in [crates/orchestrator-core/src/](crates/orchestrator-core/src/).
+- Replace `Option<String>` IO with typed `BlockInput`/`BlockOutput` enums (serde-able, versioned) in [crates/orchestrator-core/src/block/](crates/orchestrator-core/src/block/).
 - Implement async scheduler with parallel edges, multiple-next execution, cycle handling (iteration budget + run tokens), and concurrency controls.
 - Build internal definition/builder and block registry while exposing a minimal build-and-run API (`Workflow`, `Block`, `BlockId`).
 - Demo: parallel + cyclic workflow executed via `cargo run`, no UI required.
+
+**Phase 1 follow-up (after Block SDK):** (1) Add cyclic workflow demo to `orchestrator-examples`. (2) Resolve multi-sink output: implement “last link” sink rule per decisions below, or document “first sink by Uuid” as current behavior. (3) Update any remaining plan/docs paths from `backend/` to `crates/orchestrator-core/`.
 
 ### Phase 1: Workflow output resolution (decisions)
 
@@ -98,7 +100,7 @@ How the runtime chooses which block’s output to return as the workflow result 
 
 ## Phase 3: AI harness upgrades
 
-- Add provider abstraction and model config; move OpenAI specifics behind a trait in [backend/src/block/ai/](backend/src/block/ai/).
+- Add provider abstraction and model config; move OpenAI specifics behind a trait (see `poc/src/block/ai/` for reference).
 - Add token usage tracking, cost budgets, eval mode, and tool-provider switching.
 - Allow external subscriptions to AI events (prompt, response, tool call, cost).
 - Demo: AI workflow that switches models and respects a cost budget.
@@ -106,7 +108,7 @@ How the runtime chooses which block’s output to return as the workflow result 
 ## Phase 4: Eventing + logging
 
 - Introduce `RunEvent`/`BlockEvent` bus with subscriptions; wire into engine and blocks.
-- Expand [backend/src/logger.rs](backend/src/logger.rs) to structured logs (JSON + file rotation) and link to the event bus.
+- Expand logger to structured logs (see `poc/src/logger.rs` for reference) (JSON + file rotation) and link to the event bus.
 - Add diagnostics helpers and trace correlation IDs per run.
 - Demo: stream events to console + log file and show per-block timings.
 
