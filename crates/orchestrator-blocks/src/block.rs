@@ -1,4 +1,8 @@
 //! User-facing Block enum: build blocks and convert to BlockConfig for adding to a workflow.
+//!
+//! This enum covers only the built-in block types in this crate. For third-party or custom block types,
+//! construct [`BlockConfig::Custom`](orchestrator_core::BlockConfig) directly with the appropriate
+//! `type_id` and `payload`, and ensure that `type_id` is registered in the workflow's registry.
 
 use crate::{
     CombineConfig, CronConfig, CustomTransformConfig, FileReadConfig, FileWriteConfig,

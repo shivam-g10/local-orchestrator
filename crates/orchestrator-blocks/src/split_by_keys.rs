@@ -1,10 +1,30 @@
-//! SplitByKeys block: Control block that takes a Json object and config keys; outputs Multiple.
+//! SplitByKeys block: Control block that takes a Json object and config keys; outputs Multiple using an injected strategy.
+//! Pass your strategy when registering: `register_split_by_keys(registry, Arc::new(your_strategy))`.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
+
+/// Error from split-by-keys operations.
+#[derive(Debug, Clone)]
+pub struct SplitByKeysError(pub String);
+
+impl std::fmt::Display for SplitByKeysError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SplitByKeysError {}
+
+/// Split-by-keys strategy abstraction. Implement and pass when registering.
+pub trait SplitByKeysStrategy: Send + Sync {
+    fn split(&self, keys: &[String], obj: &serde_json::Value) -> Result<Vec<BlockOutput>, SplitByKeysError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitByKeysConfig {
@@ -19,11 +39,12 @@ impl SplitByKeysConfig {
 
 pub struct SplitByKeysBlock {
     config: SplitByKeysConfig,
+    strategy: Arc<dyn SplitByKeysStrategy>,
 }
 
 impl SplitByKeysBlock {
-    pub fn new(config: SplitByKeysConfig) -> Self {
-        Self { config }
+    pub fn new(config: SplitByKeysConfig, strategy: Arc<dyn SplitByKeysStrategy>) -> Self {
+        Self { config, strategy }
     }
 }
 
@@ -42,24 +63,43 @@ impl BlockExecutor for SplitByKeysBlock {
         let obj = obj
             .as_object()
             .ok_or_else(|| BlockError::Other("SplitByKeys expects a JSON object".into()))?;
-        let outputs: Vec<BlockOutput> = self
-            .config
-            .keys
+        let outputs = self
+            .strategy
+            .split(&self.config.keys, &serde_json::Value::Object(obj.clone()))
+            .map_err(|e| BlockError::Other(e.0))?;
+        Ok(BlockExecutionResult::Multiple(outputs))
+    }
+}
+
+/// Default implementation: extract value per key from object.
+pub struct KeyExtractSplitStrategy;
+
+impl SplitByKeysStrategy for KeyExtractSplitStrategy {
+    fn split(&self, keys: &[String], obj: &serde_json::Value) -> Result<Vec<BlockOutput>, SplitByKeysError> {
+        let obj = obj
+            .as_object()
+            .ok_or_else(|| SplitByKeysError("SplitByKeys expects a JSON object".into()))?;
+        let outputs: Vec<BlockOutput> = keys
             .iter()
             .map(|k| {
                 let value = obj.get(k).cloned().unwrap_or(serde_json::Value::Null);
                 BlockOutput::Json { value }
             })
             .collect();
-        Ok(BlockExecutionResult::Multiple(outputs))
+        Ok(outputs)
     }
 }
 
-pub fn register_split_by_keys(registry: &mut orchestrator_core::block::BlockRegistry) {
-    registry.register_custom("split_by_keys", |payload| {
+/// Register the split_by_keys block with a strategy.
+pub fn register_split_by_keys(
+    registry: &mut orchestrator_core::block::BlockRegistry,
+    strategy: Arc<dyn SplitByKeysStrategy>,
+) {
+    let strategy = Arc::clone(&strategy);
+    registry.register_custom("split_by_keys", move |payload| {
         let config: SplitByKeysConfig = serde_json::from_value(payload)
             .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SplitByKeysBlock::new(config)))
+        Ok(Box::new(SplitByKeysBlock::new(config, Arc::clone(&strategy))))
     });
 }
 
@@ -70,7 +110,7 @@ mod tests {
     #[test]
     fn split_by_keys_outputs_one_per_key() {
         let config = SplitByKeysConfig::new(vec!["a".into(), "b".into(), "c".into()]);
-        let block = SplitByKeysBlock::new(config);
+        let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::Json(serde_json::json!({"a": 1, "b": "two", "c": true}));
         let result = block.execute(input).unwrap();
         match result {
@@ -87,7 +127,7 @@ mod tests {
     #[test]
     fn split_by_keys_rejects_list_input() {
         let config = SplitByKeysConfig::new(vec!["x".into()]);
-        let block = SplitByKeysBlock::new(config);
+        let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::List {
             items: vec!["a".into(), "b".into()],
         };
@@ -99,7 +139,7 @@ mod tests {
     #[test]
     fn split_by_keys_error_input_returns_error() {
         let config = SplitByKeysConfig::new(vec!["x".into()]);
-        let block = SplitByKeysBlock::new(config);
+        let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
@@ -111,7 +151,7 @@ mod tests {
     #[test]
     fn split_by_keys_invalid_json_string_returns_error() {
         let config = SplitByKeysConfig::new(vec!["a".into()]);
-        let block = SplitByKeysBlock::new(config);
+        let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::String("not valid json".into());
         let err = block.execute(input);
         assert!(err.is_err());
@@ -120,7 +160,7 @@ mod tests {
     #[test]
     fn split_by_keys_rejects_non_object_json() {
         let config = SplitByKeysConfig::new(vec!["a".into()]);
-        let block = SplitByKeysBlock::new(config);
+        let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::Json(serde_json::json!([1, 2, 3]));
         let err = block.execute(input);
         assert!(err.is_err());

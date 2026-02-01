@@ -1,12 +1,31 @@
-//! ListDirectory block: Action that lists a directory and outputs paths (List).
+//! ListDirectory block: Action that lists a directory and outputs paths (List) using an injected lister.
+//! Pass your lister when registering: `register_list_directory(registry, Arc::new(your_lister))`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
+
+/// Error from list-directory operations.
+#[derive(Debug, Clone)]
+pub struct ListDirectoryError(pub String);
+
+impl std::fmt::Display for ListDirectoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ListDirectoryError {}
+
+/// Directory lister abstraction. Implement and pass when registering.
+pub trait DirectoryLister: Send + Sync {
+    fn list(&self, path: &Path) -> Result<Vec<String>, ListDirectoryError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListDirectoryConfig {
@@ -28,11 +47,12 @@ impl ListDirectoryConfig {
 
 pub struct ListDirectoryBlock {
     config: ListDirectoryConfig,
+    lister: Arc<dyn DirectoryLister>,
 }
 
 impl ListDirectoryBlock {
-    pub fn new(config: ListDirectoryConfig) -> Self {
-        Self { config }
+    pub fn new(config: ListDirectoryConfig, lister: Arc<dyn DirectoryLister>) -> Self {
+        Self { config, lister }
     }
 }
 
@@ -49,23 +69,41 @@ impl BlockExecutor for ListDirectoryBlock {
                 .path_buf()
                 .ok_or_else(|| BlockError::Other("path required from input or config".into()))?,
         };
-        if !path.is_dir() {
-            return Err(BlockError::Other(format!("not a directory: {}", path.display())));
-        }
-        let entries: Vec<String> = std::fs::read_dir(&path)
-            .map_err(|e| BlockError::Io(format!("{}: {}", path.display(), e)))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().to_string_lossy().into_owned())
-            .collect();
+        let entries = self
+            .lister
+            .list(&path)
+            .map_err(|e| BlockError::Other(e.0))?;
         Ok(BlockExecutionResult::Once(BlockOutput::List { items: entries }))
     }
 }
 
-pub fn register_list_directory(registry: &mut orchestrator_core::block::BlockRegistry) {
-    registry.register_custom("list_directory", |payload| {
+/// Default implementation using std::fs::read_dir.
+pub struct StdDirectoryLister;
+
+impl DirectoryLister for StdDirectoryLister {
+    fn list(&self, path: &Path) -> Result<Vec<String>, ListDirectoryError> {
+        if !path.is_dir() {
+            return Err(ListDirectoryError(format!("not a directory: {}", path.display())));
+        }
+        let entries: Vec<String> = std::fs::read_dir(path)
+            .map_err(|e| ListDirectoryError(format!("{}: {}", path.display(), e)))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        Ok(entries)
+    }
+}
+
+/// Register the list_directory block with a lister.
+pub fn register_list_directory(
+    registry: &mut orchestrator_core::block::BlockRegistry,
+    lister: Arc<dyn DirectoryLister>,
+) {
+    let lister = Arc::clone(&lister);
+    registry.register_custom("list_directory", move |payload| {
         let config: ListDirectoryConfig = serde_json::from_value(payload)
             .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(ListDirectoryBlock::new(config)))
+        Ok(Box::new(ListDirectoryBlock::new(config, Arc::clone(&lister))))
     });
 }
 
@@ -80,7 +118,7 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
         let path_str = dir.path().to_string_lossy().to_string();
         let config = ListDirectoryConfig::new(Some(path_str));
-        let block = ListDirectoryBlock::new(config);
+        let block = ListDirectoryBlock::new(config, Arc::new(StdDirectoryLister));
         let result = block.execute(BlockInput::empty()).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::List { items }) => {
@@ -98,7 +136,7 @@ mod tests {
         let file_path = dir.path().join("file.txt");
         std::fs::write(&file_path, "").unwrap();
         let config = ListDirectoryConfig::new(Some(file_path.to_string_lossy().to_string()));
-        let block = ListDirectoryBlock::new(config);
+        let block = ListDirectoryBlock::new(config, Arc::new(StdDirectoryLister));
         let err = block.execute(BlockInput::empty());
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("not a directory"));
@@ -107,7 +145,7 @@ mod tests {
     #[test]
     fn list_directory_no_path_returns_error() {
         let config = ListDirectoryConfig::new(None::<String>);
-        let block = ListDirectoryBlock::new(config);
+        let block = ListDirectoryBlock::new(config, Arc::new(StdDirectoryLister));
         let err = block.execute(BlockInput::empty());
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("path required"));
@@ -118,7 +156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path_str = dir.path().to_string_lossy().to_string();
         let config = ListDirectoryConfig::new(Some(path_str));
-        let block = ListDirectoryBlock::new(config);
+        let block = ListDirectoryBlock::new(config, Arc::new(StdDirectoryLister));
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };

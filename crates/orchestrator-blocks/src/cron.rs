@@ -1,16 +1,32 @@
 //! Cron block: fires on a schedule and produces a stream of outputs (Recurring).
+//! Pass your runner when registering: `register_cron(registry, Arc::new(your_runner))`.
 
-use std::str::FromStr;
-use std::time::Duration;
+use std::sync::Arc;
 
-use chrono::Utc;
-use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
+
+/// Error from cron/schedule operations.
+#[derive(Debug, Clone)]
+pub struct CronError(pub String);
+
+impl std::fmt::Display for CronError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CronError {}
+
+/// Cron runner abstraction: start a schedule and return a receiver of outputs.
+/// Implement and pass when registering.
+pub trait CronRunner: Send + Sync {
+    fn run(&self, cron_expr: &str) -> Result<mpsc::Receiver<BlockOutput>, CronError>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CronConfig {
@@ -21,27 +37,43 @@ impl CronConfig {
     pub fn new(cron: impl Into<String>) -> Self {
         Self { cron: cron.into() }
     }
-
-    fn schedule(&self) -> Result<Schedule, BlockError> {
-        Schedule::from_str(&self.cron).map_err(|e| BlockError::Other(e.to_string()))
-    }
 }
 
 pub struct CronBlock {
     config: CronConfig,
+    runner: Arc<dyn CronRunner>,
 }
 
 impl CronBlock {
-    pub fn new(config: CronConfig) -> Self {
-        Self { config }
+    pub fn new(config: CronConfig, runner: Arc<dyn CronRunner>) -> Self {
+        Self { config, runner }
     }
 }
 
 impl BlockExecutor for CronBlock {
     fn execute(&self, _input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        self.config.schedule()?;
+        let rx = self
+            .runner
+            .run(&self.config.cron)
+            .map_err(|e| BlockError::Other(e.0))?;
+        Ok(BlockExecutionResult::Recurring(rx))
+    }
+}
+
+/// Default implementation using cron crate and tokio channel.
+pub struct StdCronRunner;
+
+impl CronRunner for StdCronRunner {
+    fn run(&self, cron_expr: &str) -> Result<mpsc::Receiver<BlockOutput>, CronError> {
+        use std::str::FromStr;
+        use std::time::Duration;
+
+        use chrono::Utc;
+        use cron::Schedule;
+
+        Schedule::from_str(cron_expr).map_err(|e| CronError(e.to_string()))?;
         let (tx, rx) = mpsc::channel(64);
-        let cron_expr = self.config.cron.clone();
+        let cron_expr = cron_expr.to_string();
         let rt = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             let sched = match Schedule::from_str(&cron_expr) {
@@ -68,15 +100,20 @@ impl BlockExecutor for CronBlock {
                 }
             }
         });
-        Ok(BlockExecutionResult::Recurring(rx))
+        Ok(rx)
     }
 }
 
-pub fn register_cron(registry: &mut orchestrator_core::block::BlockRegistry) {
-    registry.register_custom("cron", |payload| {
+/// Register the cron block with a runner.
+pub fn register_cron(
+    registry: &mut orchestrator_core::block::BlockRegistry,
+    runner: Arc<dyn CronRunner>,
+) {
+    let runner = Arc::clone(&runner);
+    registry.register_custom("cron", move |payload| {
         let config: CronConfig = serde_json::from_value(payload)
             .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(CronBlock::new(config)))
+        Ok(Box::new(CronBlock::new(config, Arc::clone(&runner))))
     });
 }
 
@@ -87,7 +124,7 @@ mod tests {
     #[test]
     fn cron_config_invalid_fails_at_execute() {
         let config = CronConfig::new("not a cron");
-        let block = CronBlock::new(config);
+        let block = CronBlock::new(config, Arc::new(StdCronRunner));
         let result = block.execute(BlockInput::empty());
         assert!(result.is_err());
     }
@@ -95,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn cron_block_returns_recurring_receiver() {
         let config = CronConfig::new("* * * * * * *");
-        let block = CronBlock::new(config);
+        let block = CronBlock::new(config, Arc::new(StdCronRunner));
         let result = block.execute(BlockInput::empty()).unwrap();
         match result {
             BlockExecutionResult::Recurring(mut rx) => {
