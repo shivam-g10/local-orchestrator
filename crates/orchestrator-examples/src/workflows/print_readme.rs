@@ -1,4 +1,8 @@
 //! Example: read a file and pass through echo (multi-block chain).
+//!
+//! ```text
+//!   [FileRead path] --> (sink; single-block run returns content)
+//! ```
 
 use orchestrator_core::{Block, RunError, Workflow};
 

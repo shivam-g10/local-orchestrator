@@ -1,6 +1,10 @@
 //! Stock report workflow: custom CSV reader -> Polars pivot -> Excel file.
 //! Self-contained under workflows/stock_report/ with dummy data in data/sample_stocks.csv.
 //! Kept as alternative example; main runs expense_report.
+//!
+//! ```text
+//!   [CsvReader] --> [PolarsPivotExcel] --> output.xlsx
+//! ```
 #![allow(dead_code)]
 
 mod blocks;

@@ -1,6 +1,12 @@
 //! Example: parallel copy — for each (src, dst) pair, file_read(src) -> file_write(dst).
 //! Entry (echo) fans out to all reads so they use their config paths; each read feeds one write.
 //! Read–write chains at the same level run in parallel.
+//!
+//! ```text
+//!   [Echo] --> [FileRead src1] --> [FileWrite dst1]
+//!   [Echo] --> [FileRead src2] --> [FileWrite dst2]
+//!   [Echo] --> [FileRead srcN] --> [FileWrite dstN]
+//! ```
 
 use orchestrator_core::{Block, RunError, Workflow};
 

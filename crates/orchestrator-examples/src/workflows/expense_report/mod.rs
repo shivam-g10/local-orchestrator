@@ -1,5 +1,9 @@
 //! Personal finance expense report: bank statement CSV → "where is the money going" Excel.
 //! Self-contained under workflows/expense_report/ with sample data in data/sample_bank_statement.csv.
+//!
+//! ```text
+//!   [CsvReader] --> [ExpenseSummaryExcel] --> output.xlsx
+//! ```
 
 mod blocks;
 

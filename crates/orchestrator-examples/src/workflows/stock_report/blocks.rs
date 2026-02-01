@@ -31,6 +31,7 @@ impl BlockExecutor for CsvReaderBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockOutput, BlockError> {
         let path_str = match &input {
             BlockInput::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+            BlockInput::Text(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => self
                 .path
                 .clone()
@@ -90,8 +91,12 @@ impl PolarsPivotExcelBlock {
 impl BlockExecutor for PolarsPivotExcelBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockOutput, BlockError> {
         let csv_content = match &input {
-            BlockInput::String(s) => s.as_str(),
+            BlockInput::String(s) => s.clone(),
+            BlockInput::Text(s) => s.clone(),
+            BlockInput::Json(v) => v.to_string(),
+            BlockInput::List { items } => items.join("\n"),
             BlockInput::Empty => return Err(BlockError::Other("CSV content required from upstream".into())),
+            BlockInput::Multi { .. } => return Err(BlockError::Other("CSV content required (single input)".into())),
         };
         let cursor = Cursor::new(csv_content.as_bytes());
         let df = CsvReader::new(cursor)

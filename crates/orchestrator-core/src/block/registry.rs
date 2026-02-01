@@ -23,12 +23,20 @@ impl BlockRegistry {
         }
     }
 
-    /// Registry with built-in blocks (e.g. file_read, file_write, echo) registered.
+    /// Registry with built-in blocks (e.g. file_read, file_write, echo, delay, trigger, split, merge) registered.
     pub fn default_with_builtins() -> Self {
         let mut r = Self::new();
         super::file_read::register_file_read(&mut r);
         super::file_write::register_file_write(&mut r);
         super::echo::register_echo(&mut r);
+        super::delay::register_delay(&mut r);
+        super::trigger::register_trigger(&mut r);
+        super::split::register_split(&mut r);
+        super::merge::register_merge(&mut r);
+        super::conditional::register_conditional(&mut r);
+        super::cron_block::register_cron(&mut r);
+        super::filter_block::register_filter(&mut r);
+        super::http_request::register_http_request(&mut r);
         r
     }
 
@@ -121,10 +129,19 @@ mod tests {
     }
     impl BlockExecutor for UpperBlock {
         fn execute(&self, input: crate::block::BlockInput) -> Result<BlockOutput, BlockError> {
-            let s = match &input {
-                crate::block::BlockInput::String(t) => t.to_uppercase(),
-                crate::block::BlockInput::Empty => String::new(),
-            };
+                let s = match &input {
+                    crate::block::BlockInput::String(t) => t.to_uppercase(),
+                    crate::block::BlockInput::Text(t) => t.to_uppercase(),
+                    crate::block::BlockInput::Empty => String::new(),
+                    crate::block::BlockInput::Json(v) => v.to_string().to_uppercase(),
+                    crate::block::BlockInput::List { items } => items.join(" ").to_uppercase(),
+                    crate::block::BlockInput::Multi { outputs } => outputs
+                        .iter()
+                        .filter_map(|o| Option::<String>::from(o.clone()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_uppercase(),
+                };
             Ok(BlockOutput::String {
                 value: format!("{}{}", self.prefix, s),
             })

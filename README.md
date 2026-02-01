@@ -6,9 +6,8 @@ Currently PoC.
 
 ## Workspace layout
 
-- **crates/orchestrator-core** — library: workflow definition, run state, typed block IO, file-read block, minimal sync runner.
-- **crates/orchestrator-examples** — binary that uses orchestrator-core to run a real workflow (read file from disk).
-- **backend/** — existing crate (unchanged).
+- **crates/orchestrator-core** — library: workflow definition, run state, typed block IO, built-in blocks, minimal sync runner.
+- **crates/orchestrator-examples** — binary that uses orchestrator-core to run sample workflows (expense report, stock report, cyclic demo, etc.); use the CLI to choose a workflow.
 
 ## Foundation demo
 

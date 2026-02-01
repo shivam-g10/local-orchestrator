@@ -2,14 +2,41 @@ mod graph;
 
 use std::collections::HashMap;
 
-use crate::block::{BlockError, BlockInput, BlockOutput, BlockRegistry};
+use crate::block::{BlockConfig, BlockError, BlockInput, BlockOutput, BlockRegistry, ChildWorkflowConfig};
 use crate::core::{RunState, WorkflowDefinition, WorkflowRun};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub use graph::{CycleDetected, predecessors, ready, sinks, successors, topo_order};
+pub use graph::{CycleDetected, predecessors, primary_sink, ready, sinks, successors, topo_order};
 
 const ITERATION_BUDGET: u32 = 10_000;
+
+type JoinHandleBlock = tokio::task::JoinHandle<Result<BlockOutput, BlockError>>;
+
+/// Build BlockInput for a node: empty if no predecessors, single output converted to input if one predecessor,
+/// Multi(ordered_outputs) if multiple predecessors (order by edge order).
+fn input_for_node(
+    def: &WorkflowDefinition,
+    node_id: Uuid,
+    outputs: &HashMap<Uuid, BlockOutput>,
+) -> BlockInput {
+    let preds = predecessors(def, node_id);
+    if preds.is_empty() {
+        return BlockInput::empty();
+    }
+    if preds.len() == 1 {
+        return preds
+            .first()
+            .and_then(|pred_id| outputs.get(pred_id).cloned())
+            .map(|o| BlockInput::from(Option::<String>::from(o)))
+            .unwrap_or(BlockInput::empty());
+    }
+    let ordered: Vec<BlockOutput> = preds
+        .iter()
+        .filter_map(|pred_id| outputs.get(pred_id).cloned())
+        .collect();
+    BlockInput::Multi { outputs: ordered }
+}
 
 /// Runtime execution error.
 #[derive(Debug, Error)]
@@ -27,10 +54,12 @@ pub enum RuntimeError {
 }
 
 /// Run a single-block workflow: resolve entry, build block from registry, execute once (sync), update run state.
+/// When `entry_input` is Some, the entry block receives that input instead of empty.
 pub fn run_single_block_workflow(
     def: &WorkflowDefinition,
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
+    entry_input: Option<BlockInput>,
 ) -> Result<BlockOutput, RuntimeError> {
     let entry_id = def.entry().ok_or(RuntimeError::NoEntryNode)?;
     let node_def = def
@@ -40,8 +69,9 @@ pub fn run_single_block_workflow(
 
     run.set_state(RunState::Running);
 
+    let input = entry_input.unwrap_or_else(BlockInput::empty);
     let block = registry.get(&node_def.config)?;
-    let output = block.execute(BlockInput::empty())?;
+    let output = block.execute(input)?;
 
     run.mark_block_completed(*entry_id);
     run.set_state(RunState::Completed);
@@ -50,77 +80,94 @@ pub fn run_single_block_workflow(
 }
 
 /// Run a workflow (single-block or multi-block DAG). Async entrypoint used by run() and run_async().
+/// When `entry_input` is Some, the entry node receives that input instead of empty.
 pub async fn run_workflow(
     def: &WorkflowDefinition,
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
+    mut entry_input: Option<BlockInput>,
 ) -> Result<BlockOutput, RuntimeError> {
     def.entry().ok_or(RuntimeError::NoEntryNode)?;
     let nodes = def.nodes();
     let edges = def.edges();
 
     if nodes.len() == 1 && edges.is_empty() {
-        return run_single_block_workflow(def, run, registry);
+        return run_single_block_workflow(def, run, registry, entry_input);
     }
 
-    let mut sink_list = sinks(def);
-    if sink_list.is_empty() {
-        return Err(RuntimeError::NoSink);
-    }
-    sink_list.sort();
-    let sink_id = sink_list[0];
-    // When multiple sinks exist (e.g. main path + log branch), all run; we return the primary sink's output (first by id).
+    let sink_id = primary_sink(def).ok_or(RuntimeError::NoSink)?;
+    let entry_id = *def.entry().unwrap();
 
     run.set_state(RunState::Running);
 
     match topo_order(def) {
         Ok(order) => {
-            let entry_id = *def.entry().unwrap();
             let levels = group_by_level(def, &order, entry_id);
             let mut outputs: HashMap<Uuid, BlockOutput> = HashMap::new();
             let mut last_completed_id: Option<Uuid> = None;
             for level_nodes in levels {
-                let mut joins = Vec::with_capacity(level_nodes.len());
+                let mut joins: Vec<(Uuid, Option<JoinHandleBlock>)> =
+                    Vec::with_capacity(level_nodes.len());
                 for node_id in &level_nodes {
                     let node_def = nodes
                         .get(node_id)
                         .ok_or(RuntimeError::EntryNodeNotFound(*node_id))?
                         .clone();
-                    let input = predecessors(def, *node_id)
-                        .first()
-                        .and_then(|pred_id| outputs.get(pred_id).cloned())
-                        .map(|o| BlockInput::from(Option::<String>::from(o)))
-                        .unwrap_or(BlockInput::empty());
-                    let block = registry.get(&node_def.config)?;
-                    joins.push(tokio::task::spawn_blocking(move || block.execute(input)));
-                }
-                for (node_id, join_handle) in level_nodes.into_iter().zip(joins) {
-                    let output = join_handle
+                    let input = if *node_id == entry_id && entry_input.is_some() {
+                        entry_input.take().unwrap()
+                    } else {
+                        input_for_node(def, *node_id, &outputs)
+                    };
+                    if let BlockConfig::ChildWorkflow(ChildWorkflowConfig { definition }) = &node_def.config {
+                        let mut child_run = WorkflowRun::new(definition);
+                        let output = Box::pin(run_workflow(
+                            definition,
+                            &mut child_run,
+                            registry,
+                            Some(input),
+                        ))
                         .await
-                        .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))??;
-                    outputs.insert(node_id, output);
-                    run.mark_block_completed(node_id);
-                    last_completed_id = Some(node_id);
+                        .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))?;
+                        outputs.insert(*node_id, output);
+                        run.mark_block_completed(*node_id);
+                        last_completed_id = Some(*node_id);
+                        joins.push((*node_id, None));
+                    } else {
+                        let block = registry.get(&node_def.config)?;
+                        let join_handle = tokio::task::spawn_blocking(move || block.execute(input));
+                        joins.push((*node_id, Some(join_handle)));
+                    }
+                }
+                for (node_id, join_handle_opt) in joins {
+                    if let Some(join_handle) = join_handle_opt {
+                        let output = join_handle
+                            .await
+                            .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))??;
+                        outputs.insert(node_id, output);
+                        run.mark_block_completed(node_id);
+                        last_completed_id = Some(node_id);
+                    }
                 }
             }
             run.set_state(RunState::Completed);
-            // Prefer primary sink; 4th fallback: whatever was run last
             outputs
                 .remove(&sink_id)
                 .or_else(|| last_completed_id.and_then(|id| outputs.remove(&id)))
                 .ok_or(RuntimeError::EntryNodeNotFound(sink_id))
         }
-        Err(CycleDetected) => run_workflow_iteration(def, run, registry, sink_id).await,
+        Err(CycleDetected) => run_workflow_iteration(def, run, registry, sink_id, entry_input).await,
     }
 }
 
 /// Run workflow in iteration mode (graph has a cycle). Uses ready set and iteration budget.
 /// Nodes can run multiple times; ready = all predecessors have produced output.
+/// When entry_input is Some, the entry node receives it on first run only.
 async fn run_workflow_iteration(
     def: &WorkflowDefinition,
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
     sink_id: Uuid,
+    mut entry_input: Option<BlockInput>,
 ) -> Result<BlockOutput, RuntimeError> {
     let nodes = def.nodes();
     let entry_id = *def.entry().unwrap();
@@ -148,18 +195,33 @@ async fn run_workflow_iteration(
                 .get(&node_id)
                 .ok_or(RuntimeError::EntryNodeNotFound(node_id))?
                 .clone();
-            let input = predecessors(def, node_id)
-                .first()
-                .and_then(|pred_id| outputs.get(pred_id).cloned())
-                .map(|o| BlockInput::from(Option::<String>::from(o)))
-                .unwrap_or(BlockInput::empty());
-            let block = registry.get(&node_def.config)?;
-            let output = tokio::task::spawn_blocking(move || block.execute(input))
+            let input = if node_id == entry_id && entry_input.is_some() {
+                entry_input.take().unwrap()
+            } else {
+                input_for_node(def, node_id, &outputs)
+            };
+            if let BlockConfig::ChildWorkflow(ChildWorkflowConfig { definition }) = &node_def.config {
+                let mut child_run = WorkflowRun::new(definition);
+                let output = Box::pin(run_workflow(
+                    definition,
+                    &mut child_run,
+                    registry,
+                    Some(input),
+                ))
                 .await
-                .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))??;
-            outputs.insert(node_id, output);
-            run.mark_block_completed(node_id);
-            last_completed_id = Some(node_id);
+                .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))?;
+                outputs.insert(node_id, output);
+                run.mark_block_completed(node_id);
+                last_completed_id = Some(node_id);
+            } else {
+                let block = registry.get(&node_def.config)?;
+                let output = tokio::task::spawn_blocking(move || block.execute(input))
+                    .await
+                    .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))??;
+                outputs.insert(node_id, output);
+                run.mark_block_completed(node_id);
+                last_completed_id = Some(node_id);
+            }
         }
     }
 }

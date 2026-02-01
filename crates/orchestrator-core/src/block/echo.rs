@@ -16,6 +16,20 @@ impl BlockExecutor for EchoBlock {
         let output = match input {
             BlockInput::Empty => BlockOutput::empty(),
             BlockInput::String(s) => BlockOutput::String { value: s },
+            BlockInput::Text(s) => BlockOutput::String { value: s },
+            BlockInput::Json(v) => BlockOutput::String {
+                value: v.to_string(),
+            },
+            BlockInput::List { items } => BlockOutput::String {
+                value: items.join("\n"),
+            },
+            BlockInput::Multi { outputs } => BlockOutput::String {
+                value: outputs
+                    .iter()
+                    .filter_map(|o| Option::<String>::from(o.clone()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
         };
         Ok(output)
     }

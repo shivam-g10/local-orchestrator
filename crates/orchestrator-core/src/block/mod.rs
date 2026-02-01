@@ -5,7 +5,16 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "v", rename_all = "snake_case")]
 pub enum BlockInput {
     Empty,
+    #[serde(rename = "string")]
     String(String),
+    /// Single text value (semantic alias; use String for backward compatibility).
+    Text(String),
+    /// Structured data for agents, forms, APIs.
+    Json(serde_json::Value),
+    /// Ordered list of strings (lines, CSV rows, URLs).
+    List { items: Vec<String> },
+    /// Multiple predecessor outputs (ordered by edge order or predecessor id).
+    Multi { outputs: Vec<BlockOutput> },
 }
 
 impl BlockInput {
@@ -28,6 +37,9 @@ impl From<BlockInput> for Option<String> {
         match input {
             BlockInput::Empty => None,
             BlockInput::String(s) => Some(s),
+            BlockInput::Text(s) => Some(s),
+            BlockInput::Json(v) => v.as_str().map(String::from).or_else(|| Some(v.to_string())),
+            BlockInput::List { .. } | BlockInput::Multi { .. } => None,
         }
     }
 }
@@ -39,6 +51,12 @@ pub enum BlockOutput {
     Empty,
     #[serde(rename = "string")]
     String { value: String },
+    /// Single text value (semantic alias).
+    Text { value: String },
+    /// Structured data for agents, forms, APIs.
+    Json { value: serde_json::Value },
+    /// Ordered list of strings.
+    List { items: Vec<String> },
 }
 
 impl BlockOutput {
@@ -61,6 +79,9 @@ impl From<BlockOutput> for Option<String> {
         match output {
             BlockOutput::Empty => None,
             BlockOutput::String { value: s } => Some(s),
+            BlockOutput::Text { value: s } => Some(s),
+            BlockOutput::Json { value: v } => v.as_str().map(String::from).or_else(|| Some(v.to_string())),
+            BlockOutput::List { .. } => None,
         }
     }
 }
@@ -105,16 +126,66 @@ mod tests {
         let s: Option<String> = restored.into();
         assert_eq!(s, Some("test".to_string()));
     }
+
+    #[test]
+    fn block_input_output_json_roundtrip() {
+        let input = BlockInput::Json(serde_json::json!({"a": 1, "b": "x"}));
+        let json = serde_json::to_string(&input).unwrap();
+        let restored: BlockInput = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, BlockInput::Json(_)));
+        let output = BlockOutput::Json { value: serde_json::json!({"ok": true}) };
+        let json = serde_json::to_string(&output).unwrap();
+        let restored: BlockOutput = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, BlockOutput::Json { .. }));
+    }
+
+    #[test]
+    fn block_input_output_list_roundtrip() {
+        let input = BlockInput::List {
+            items: vec!["a".into(), "b".into()],
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let restored: BlockInput = serde_json::from_str(&json).unwrap();
+        match &restored {
+            BlockInput::List { items } => assert_eq!(items, &["a", "b"]),
+            _ => panic!("expected List"),
+        }
+        let output = BlockOutput::List { items: vec!["x".into(), "y".into()] };
+        let json = serde_json::to_string(&output).unwrap();
+        let restored: BlockOutput = serde_json::from_str(&json).unwrap();
+        match &restored {
+            BlockOutput::List { items } => assert_eq!(items, &["x", "y"]),
+            _ => panic!("expected List"),
+        }
+    }
 }
 
 pub mod config;
+pub mod child_workflow;
+pub mod conditional;
+pub mod cron_block;
+pub mod delay;
 pub mod echo;
 pub mod file_read;
 pub mod file_write;
+pub mod filter_block;
+pub mod http_request;
+pub mod merge;
 pub mod registry;
+pub mod split;
+pub mod trigger;
 
 pub use config::BlockConfig;
+pub use child_workflow::ChildWorkflowConfig;
+pub use conditional::{register_conditional, ConditionalBlock, ConditionalConfig, RuleKind};
+pub use cron_block::{register_cron, CronBlock, CronConfig};
+pub use delay::{register_delay, DelayBlock, DelayConfig};
 pub use echo::{register_echo, EchoBlock, EchoConfig};
+pub use filter_block::{register_filter, FilterBlock, FilterConfig, FilterPredicate};
 pub use file_read::{register_file_read, FileReadBlock, FileReadConfig};
 pub use file_write::{register_file_write, FileWriteBlock, FileWriteConfig};
+pub use http_request::{register_http_request, HttpRequestBlock, HttpRequestConfig};
+pub use merge::{register_merge, MergeBlock, MergeConfig};
 pub use registry::BlockRegistry;
+pub use split::{register_split, SplitBlock, SplitConfig};
+pub use trigger::{register_trigger, TriggerBlock, TriggerConfig};

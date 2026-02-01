@@ -37,6 +37,26 @@ pub fn sinks(def: &WorkflowDefinition) -> Vec<Uuid> {
         .collect()
 }
 
+/// Primary sink for workflow output: when multiple sinks exist, use the sink that is the
+/// destination of the last link (last edge's `to`). If that node is not a sink, fall back to
+/// first sink by sorted Uuid (deterministic). Returns None if no sinks.
+pub fn primary_sink(def: &WorkflowDefinition) -> Option<Uuid> {
+    let mut sink_list = sinks(def);
+    if sink_list.is_empty() {
+        return None;
+    }
+    if sink_list.len() == 1 {
+        return Some(sink_list[0]);
+    }
+    if let Some((_, to_id)) = def.edges().last()
+        && sink_list.contains(to_id)
+    {
+        return Some(*to_id);
+    }
+    sink_list.sort();
+    Some(sink_list[0])
+}
+
 /// Topological order of node ids (Kahn's algorithm). Returns `Err(CycleDetected)` if the graph has a cycle.
 pub fn topo_order(def: &WorkflowDefinition) -> Result<Vec<Uuid>, CycleDetected> {
     let nodes = def.nodes();
@@ -209,6 +229,33 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert!(s.contains(&left));
         assert!(s.contains(&right));
+    }
+
+    #[test]
+    fn primary_sink_last_link() {
+        let entry = Uuid::new_v4();
+        let left = Uuid::new_v4();
+        let right = Uuid::new_v4();
+        let def = WorkflowDefinition {
+            id: Uuid::new_v4(),
+            nodes: HashMap::from([
+                (entry, node_def("entry")),
+                (left, node_def("left")),
+                (right, node_def("right")),
+            ]),
+            edges: vec![(entry, left), (entry, right)],
+            entry: Some(entry),
+        };
+        let primary = primary_sink(&def).unwrap();
+        assert!(primary == left || primary == right);
+        let def_last_link_right = WorkflowDefinition {
+            id: Uuid::new_v4(),
+            nodes: def.nodes.clone(),
+            edges: vec![(entry, left), (entry, right)],
+            entry: Some(entry),
+        };
+        let primary2 = primary_sink(&def_last_link_right).unwrap();
+        assert_eq!(primary2, right);
     }
 
     #[test]

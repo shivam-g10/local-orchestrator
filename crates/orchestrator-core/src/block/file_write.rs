@@ -32,8 +32,15 @@ impl FileWriteBlock {
 impl BlockExecutor for FileWriteBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockOutput, BlockError> {
         let content = match &input {
-            BlockInput::String(s) => s.as_str(),
-            BlockInput::Empty => {
+            BlockInput::String(s) => s.clone(),
+            BlockInput::Text(s) => s.clone(),
+            BlockInput::Json(v) => v.to_string(),
+            BlockInput::List { .. } => {
+                return Err(BlockError::Other(
+                    "file_write expects single string content".into(),
+                ));
+            }
+            BlockInput::Empty | BlockInput::Multi { .. } => {
                 return Err(BlockError::Other(
                     "content required from upstream (e.g. file_read)".into(),
                 ));

@@ -34,6 +34,7 @@ impl BlockExecutor for FileReadBlock {
         // Path to read: from input if provided (non-empty string), else from config. Both missing => error.
         let path = match &input {
             BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
+            BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
             _ => self
                 .config
                 .path

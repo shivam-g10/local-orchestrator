@@ -1,4 +1,8 @@
 //! Example: single file_read block (minimal workflow).
+//!
+//! ```text
+//!   [FileRead path] --> output (single block, no links)
+//! ```
 
 use orchestrator_core::{Block, RunError, Workflow};
 
