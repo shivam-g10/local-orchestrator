@@ -6,7 +6,8 @@
 
 use crate::{
     CombineConfig, CronConfig, CustomTransformConfig, FileReadConfig, FileWriteConfig,
-    ListDirectoryConfig, SendEmailConfig, SplitByKeysConfig, TemplateHandlebarsConfig,
+    ListDirectoryConfig, SelectFirstConfig, SendEmailConfig, SplitByKeysConfig,
+    TemplateHandlebarsConfig,
 };
 use orchestrator_core::block::{BlockConfig, ChildWorkflowConfig};
 use orchestrator_core::WorkflowDefinition;
@@ -15,13 +16,17 @@ use orchestrator_core::WorkflowDefinition;
 #[derive(Debug, Clone)]
 pub enum Block {
     Cron { cron: String },
-    ListDirectory { path: Option<String> },
+    ListDirectory {
+        path: Option<String>,
+        force_config_path: bool,
+    },
     Combine { keys: Vec<String> },
     CustomTransform { template: Option<String> },
     SplitByKeys { keys: Vec<String> },
     FileWrite { path: Option<String> },
     MarkdownToHtml,
     FileRead { path: Option<String> },
+    SelectFirst { strategy: Option<String> },
     TemplateHandlebars {
         template: Option<String>,
         partials: Option<serde_json::Value>,
@@ -40,6 +45,15 @@ impl Block {
     pub fn list_directory(path: Option<impl AsRef<str>>) -> Self {
         Block::ListDirectory {
             path: path.map(|p| p.as_ref().to_string()),
+            force_config_path: false,
+        }
+    }
+
+    /// List directory at config path, ignoring upstream input (e.g. when entry is Cron).
+    pub fn list_directory_force_config(path: Option<impl AsRef<str>>) -> Self {
+        Block::ListDirectory {
+            path: path.map(|p| p.as_ref().to_string()),
+            force_config_path: true,
         }
     }
 
@@ -70,6 +84,12 @@ impl Block {
     pub fn file_read(path: Option<impl AsRef<str>>) -> Self {
         Block::FileRead {
             path: path.map(|p| p.as_ref().to_string()),
+        }
+    }
+
+    pub fn select_first(strategy: Option<impl Into<String>>) -> Self {
+        Block::SelectFirst {
+            strategy: strategy.map(|s| s.into()),
         }
     }
 
@@ -104,9 +124,15 @@ impl From<Block> for BlockConfig {
                 type_id: "cron".to_string(),
                 payload: serde_json::to_value(CronConfig::new(cron)).unwrap(),
             },
-            Block::ListDirectory { path } => BlockConfig::Custom {
+            Block::ListDirectory {
+                path,
+                force_config_path,
+            } => BlockConfig::Custom {
                 type_id: "list_directory".to_string(),
-                payload: serde_json::to_value(ListDirectoryConfig::new(path)).unwrap(),
+                payload: serde_json::to_value(
+                    ListDirectoryConfig::new(path).with_force_config_path(force_config_path),
+                )
+                .unwrap(),
             },
             Block::Combine { keys } => BlockConfig::Custom {
                 type_id: "combine".to_string(),
@@ -131,6 +157,10 @@ impl From<Block> for BlockConfig {
             Block::FileRead { path } => BlockConfig::Custom {
                 type_id: "file_read".to_string(),
                 payload: serde_json::to_value(FileReadConfig::new(path)).unwrap(),
+            },
+            Block::SelectFirst { strategy } => BlockConfig::Custom {
+                type_id: "select_first".to_string(),
+                payload: serde_json::to_value(SelectFirstConfig::new(strategy)).unwrap(),
             },
             Block::TemplateHandlebars { template, partials } => BlockConfig::Custom {
                 type_id: "template_handlebars".to_string(),

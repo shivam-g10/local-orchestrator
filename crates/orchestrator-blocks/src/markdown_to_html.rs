@@ -48,7 +48,10 @@ fn input_to_string(input: &BlockInput) -> Result<String, BlockError> {
         BlockInput::String(s) => Ok(s.clone()),
         BlockInput::Text(s) => Ok(s.clone()),
         BlockInput::Empty => Ok(String::new()),
-        BlockInput::Json(v) => Ok(v.to_string()),
+        BlockInput::Json(v) => Ok(v
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| v.to_string())),
         BlockInput::List { items } => Ok(items.join("\n")),
         BlockInput::Multi { outputs } => {
             let s: String = outputs

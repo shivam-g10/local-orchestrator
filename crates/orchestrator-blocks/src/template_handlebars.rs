@@ -84,53 +84,52 @@ impl BlockExecutor for TemplateHandlebarsBlock {
             return Err(BlockError::Other(message.clone()));
         }
 
-        let template = self.config.template.as_deref().unwrap_or("");
-        let needs_data = template_has_placeholders(template);
-
-        let data = match &input {
-            BlockInput::Json(v) => v.clone(),
-            BlockInput::String(s) => serde_json::Value::String(s.clone()),
-            BlockInput::Text(s) => serde_json::Value::String(s.clone()),
-            BlockInput::Empty => {
-                if needs_data {
-                    return Err(BlockError::Other(
-                        "template_handlebars requires JSON (or compatible) input when template has placeholders".into(),
-                    ));
-                }
-                serde_json::Value::Null
-            }
-            BlockInput::List { .. } => {
-                if needs_data {
-                    return Err(BlockError::Other(
-                        "template_handlebars expects a single data object for templating, not List".into(),
-                    ));
-                }
-                serde_json::Value::Null
-            }
-            BlockInput::Multi { outputs } => {
-                if needs_data {
-                    if let Some(first) = outputs.first() {
-                        output_to_json(first)
+        // When input is Json with key "template", use it as template string and rest as data.
+        let (template, data) = match &input {
+            BlockInput::Json(v) if v.is_object() => {
+                if let Some(tpl_val) = v.get("template") {
+                    if let Some(tpl_str) = tpl_val.as_str() {
+                        let mut data_obj = v.clone();
+                        if let Some(obj) = data_obj.as_object_mut() {
+                            obj.remove("template");
+                        }
+                        (tpl_str.to_string(), data_obj)
                     } else {
-                        return Err(BlockError::Other(
-                            "template_handlebars requires at least one data input when template has placeholders".into(),
-                        ));
+                        (self.config.template.as_deref().unwrap_or("").to_string(), v.clone())
                     }
                 } else {
-                    outputs
-                        .first()
-                        .map(output_to_json)
-                        .unwrap_or(serde_json::Value::Null)
+                    (self.config.template.as_deref().unwrap_or("").to_string(), v.clone())
                 }
             }
-            BlockInput::Error { .. } => unreachable!(),
+            _ => (
+                self.config.template.as_deref().unwrap_or("").to_string(),
+                match &input {
+                    BlockInput::Json(v) => v.clone(),
+                    BlockInput::String(s) => serde_json::Value::String(s.clone()),
+                    BlockInput::Text(s) => serde_json::Value::String(s.clone()),
+                    BlockInput::Empty => serde_json::Value::Null,
+                    BlockInput::List { .. } => serde_json::Value::Null,
+                    BlockInput::Multi { outputs } => outputs
+                        .first()
+                        .map(output_to_json)
+                        .unwrap_or(serde_json::Value::Null),
+                    BlockInput::Error { .. } => unreachable!(),
+                },
+            ),
         };
+
+        let needs_data = template_has_placeholders(&template);
+        if needs_data && data.is_null() {
+            return Err(BlockError::Other(
+                "template_handlebars requires JSON (or compatible) input when template has placeholders".into(),
+            ));
+        }
 
         let out = if template.is_empty() {
             data.to_string()
         } else {
             self.renderer
-                .render(template, &data, self.config.partials.as_ref())
+                .render(&template, &data, self.config.partials.as_ref())
                 .map_err(|e| BlockError::Other(e.0))?
         };
         Ok(BlockExecutionResult::Once(BlockOutput::Text { value: out }))

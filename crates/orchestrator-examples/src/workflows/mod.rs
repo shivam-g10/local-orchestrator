@@ -11,6 +11,8 @@
 // pub mod single_file_read;
 // pub mod stock_report;
 
+pub mod personal_reports;
+
 // #[allow(unused_imports)]
 // pub use child_workflow_demo::child_workflow_demo_workflow;
 // #[allow(unused_imports)]
@@ -35,3 +37,5 @@
 // pub use news_aggregator::run_news_aggregator_workflow;
 // #[allow(unused_imports)]
 // pub use retry_until_success::run_retry_until_success_workflow;
+
+pub use personal_reports::{ensure_dummy_data, run_personal_reports_workflow};

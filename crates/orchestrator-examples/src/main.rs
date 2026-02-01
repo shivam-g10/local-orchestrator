@@ -2,21 +2,21 @@
 
 mod workflows;
 
-// use clap::{Parser, Subcommand};
-// use std::path::Path;
+use clap::{Parser, Subcommand};
+use std::path::Path;
 
-// #[derive(Parser)]
-// #[command(name = "orchestrator-examples")]
-// #[command(about = "Run sample workflows using orchestrator-core")]
-// struct Cli {
-//     #[command(subcommand)]
-//     command: Option<Commands>,
-// }
+#[derive(Parser)]
+#[command(name = "orchestrator-examples")]
+#[command(about = "Run sample workflows using orchestrator-core")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-// #[derive(Subcommand)]
-// enum Commands {
-//     /// Personal finance: bank statement CSV -> Excel (spending by category and month).
-//     ExpenseReport {
+#[derive(Subcommand)]
+enum Commands {
+    //     /// Personal finance: bank statement CSV -> Excel (spending by category and month).
+    //     ExpenseReport {
 //         /// Path to bank statement CSV (default: bundled sample).
 //         #[arg(short, long)]
 //         statement: Option<String>,
@@ -91,10 +91,39 @@ mod workflows;
 //     },
 // }
 
-// fn main() -> Result<(), Box<dyn std::error::Error>> {
-//     let cli = Cli::parse();
+    /// Personal reports: daily notes + reports dir → combine → transform → split → file writes + email child.
+    PersonalReports {
+        /// Base directory for data (daily_notes/, reports/, email_template.hbs). If set, dummy data is generated here.
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Daily notes directory (default: data_dir/daily_notes or data/personal_reports/daily_notes).
+        #[arg(long)]
+        daily_notes_dir: Option<String>,
+        /// Reports directory (default: data_dir/reports or data/personal_reports/reports).
+        #[arg(long)]
+        reports_dir: Option<String>,
+        /// Email template path (default: data_dir/email_template.hbs or data/personal_reports/email_template.hbs).
+        #[arg(long)]
+        template_path: Option<String>,
+        /// Next-day note output path (default: data_dir/next_day_note.md).
+        #[arg(long)]
+        next_day_note_path: Option<String>,
+        /// Stub mailer output file path (default: data_dir/personal_reports_email.html).
+        #[arg(long)]
+        email_out: Option<String>,
+    },
+}
 
-//     match cli.command {
+fn default_personal_reports_data_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("data")
+        .join("personal_reports")
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    match cli.command {
 //         None => {
 //             println!("=== Personal finance: where is the money going? ===\n");
 //             let statement_path = workflows::expense_report::default_statement_path();
@@ -189,11 +218,46 @@ mod workflows;
 //             let out = workflows::run_context_payload_demo_workflow(url.as_deref())?;
 //             println!("Context/payload demo output: {}", out);
 //         }
-//     }
+        Some(Commands::PersonalReports {
+            data_dir,
+            daily_notes_dir,
+            reports_dir,
+            template_path,
+            next_day_note_path,
+            email_out,
+        }) => {
+            let base = data_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(default_personal_reports_data_dir);
+            workflows::ensure_dummy_data(&base)?;
+            let daily_notes = daily_notes_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| base.join("daily_notes"));
+            let reports = reports_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| base.join("reports"));
+            let template = template_path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| base.join("email_template.hbs"));
+            let next_day = next_day_note_path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| base.join("next_day_note.md"));
+            let email_out = email_out
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| base.join("personal_reports_email.html"));
+            workflows::run_personal_reports_workflow(
+                &daily_notes,
+                &reports,
+                &template,
+                &next_day,
+                &email_out,
+            )?;
+            println!("Personal reports workflow completed. Email stub written to {}", email_out.display());
+        }
+        None => {
+            eprintln!("No subcommand given. Use --help or 'personal-reports' to run the personal reports example.");
+        }
+    }
 
-//     Ok(())
-// }
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }

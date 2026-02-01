@@ -61,7 +61,10 @@ impl BlockExecutor for FileWriteBlock {
         let content = match &input {
             BlockInput::String(s) => s.clone(),
             BlockInput::Text(s) => s.clone(),
-            BlockInput::Json(v) => v.to_string(),
+            BlockInput::Json(v) => v
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| v.to_string()),
             BlockInput::List { .. } => {
                 return Err(BlockError::Other(
                     "file_write expects single string content".into(),

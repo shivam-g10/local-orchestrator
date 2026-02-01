@@ -31,13 +31,22 @@ pub trait DirectoryLister: Send + Sync {
 pub struct ListDirectoryConfig {
     #[serde(default)]
     pub path: Option<String>,
+    /// When true, always use config's path and ignore input (e.g. when upstream is Cron).
+    #[serde(default)]
+    pub force_config_path: bool,
 }
 
 impl ListDirectoryConfig {
     pub fn new(path: Option<impl Into<String>>) -> Self {
         Self {
             path: path.map(Into::into),
+            force_config_path: false,
         }
+    }
+
+    pub fn with_force_config_path(mut self, force: bool) -> Self {
+        self.force_config_path = force;
+        self
     }
 
     fn path_buf(&self) -> Option<PathBuf> {
@@ -61,13 +70,19 @@ impl BlockExecutor for ListDirectoryBlock {
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
-        let path = match &input {
-            BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-            BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-            _ => self
-                .config
+        let path = if self.config.force_config_path {
+            self.config
                 .path_buf()
-                .ok_or_else(|| BlockError::Other("path required from input or config".into()))?,
+                .ok_or_else(|| BlockError::Other("path required when force_config_path is true".into()))?
+        } else {
+            match &input {
+                BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
+                BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
+                _ => self
+                    .config
+                    .path_buf()
+                    .ok_or_else(|| BlockError::Other("path required from input or config".into()))?,
+            }
         };
         let entries = self
             .lister

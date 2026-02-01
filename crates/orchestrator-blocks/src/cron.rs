@@ -35,7 +35,9 @@ pub struct CronConfig {
 
 impl CronConfig {
     pub fn new(cron: impl Into<String>) -> Self {
-        Self { cron: cron.into() }
+        Self {
+            cron: cron.into().trim().to_string(),
+        }
     }
 }
 
@@ -71,6 +73,14 @@ impl CronRunner for StdCronRunner {
         use chrono::Utc;
         use cron::Schedule;
 
+        let cron_expr = cron_expr.trim();
+        // Cron 0.15 expects 7 fields: sec min hour day month day_of_week year. Normalize 5-field to 7.
+        let cron_expr = if cron_expr.split_whitespace().count() == 5 {
+            format!("0 {} *", cron_expr)
+        } else {
+            cron_expr.to_string()
+        };
+        let cron_expr = cron_expr.as_str();
         Schedule::from_str(cron_expr).map_err(|e| CronError(e.to_string()))?;
         let (tx, rx) = mpsc::channel(64);
         let cron_expr = cron_expr.to_string();
@@ -82,18 +92,22 @@ impl CronRunner for StdCronRunner {
             };
             loop {
                 let now = Utc::now();
+                println!("now: {}", now);
                 let next_run = match sched.upcoming(Utc).next() {
                     Some(t) => t,
                     None => break,
                 };
+                println!("next_run: {}", next_run);
                 let duration = match (next_run - now).to_std() {
                     Ok(d) => d,
                     Err(_) => break,
                 };
+                println!("duration: {}ms", &duration.as_millis());
                 if duration > Duration::ZERO {
                     std::thread::sleep(duration);
                 }
                 let value = Utc::now().to_rfc3339();
+                println!("value: {}", value);
                 let out = BlockOutput::Text { value };
                 if rt.block_on(tx.send(out)).is_err() {
                     break;
@@ -111,8 +125,9 @@ pub fn register_cron(
 ) {
     let runner = Arc::clone(&runner);
     registry.register_custom("cron", move |payload| {
-        let config: CronConfig = serde_json::from_value(payload)
+        let mut config: CronConfig = serde_json::from_value(payload)
             .map_err(|e| BlockError::Other(e.to_string()))?;
+        config.cron = config.cron.trim().to_string();
         Ok(Box::new(CronBlock::new(config, Arc::clone(&runner))))
     });
 }

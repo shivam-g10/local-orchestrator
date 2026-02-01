@@ -19,6 +19,7 @@ mod file_read;
 mod file_write;
 mod list_directory;
 mod markdown_to_html;
+mod select_first;
 mod send_email;
 mod split_by_keys;
 mod template_handlebars;
@@ -44,7 +45,10 @@ pub use list_directory::{
 };
 pub use markdown_to_html::{
     MarkdownError, MarkdownToHtml, MarkdownToHtmlBlock, MarkdownToHtmlConfig,
-    PulldownMarkdownRenderer,
+    PulldownMarkdownRenderer, register_markdown_to_html,
+};
+pub use select_first::{
+    ListSelector, SelectError, SelectFirstBlock, SelectFirstConfig, StdListSelector,
 };
 pub use send_email::{SendEmail, SendEmailBlock, SendEmailConfig, SendEmailError};
 pub use split_by_keys::{
@@ -73,6 +77,7 @@ pub fn default_registry() -> BlockRegistry {
     file_write::register_file_write(&mut r, std::sync::Arc::new(file_write::StdFileWriter));
     markdown_to_html::register_markdown_to_html(&mut r, std::sync::Arc::new(markdown_to_html::PulldownMarkdownRenderer));
     file_read::register_file_read(&mut r, std::sync::Arc::new(file_read::StdFileReader));
+    select_first::register_select_first(&mut r, std::sync::Arc::new(select_first::StdListSelector));
     template_handlebars::register_template_handlebars(&mut r, std::sync::Arc::new(template_handlebars::HandlebarsTemplateRenderer));
     r
 }
