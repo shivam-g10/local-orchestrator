@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 orchestrator-core = { version = "0.1.0", path = "../orchestrator-core" }
+orchestrator-blocks = { version = "0.1.0", path = "../orchestrator-blocks" }
 polars = { version = "0.52", default-features = false, features = ["csv", "dtype-full"] }
 polars_excel_writer = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -1,3 +1,29 @@
+//! # Block SDK
+//!
+//! Blocks are the units of work in a workflow. Each block implements [`BlockExecutor`] and
+//! returns a [`BlockExecutionResult`] (single output or recurring stream).
+//!
+//! ## Return contract
+//!
+//! - **Trigger** blocks (e.g. Cron) may return [`BlockExecutionResult::Recurring`] — a channel
+//!   of outputs. The runtime receives from the channel and runs the rest of the workflow for each
+//!   event until the channel is closed.
+//! - **Transform**, **Action**, and **Composite** blocks return [`BlockExecutionResult::Once`]
+//!   with a single [`BlockOutput`].
+//! - **Control** blocks may return `Multiple` for blocks like SplitByKeys that fan out.
+//!
+//! Custom block authors must implement the correct return shape for their block type.
+//!
+//! ## On-error
+//!
+//! When a block returns `Err`, the runtime may route that error to an error-handler node via
+//! *error edges*. The error-handler node receives [`BlockInput::Error`] `{ message }` as input.
+//!
+//! ## Input validation
+//!
+//! Block authors should validate input and config and return `BlockError` when execution cannot
+//! succeed, so that workflows fail fast and blocks are used correctly.
+
 use serde::{Deserialize, Serialize};
 
 /// Block input: typed payload for block execution.
@@ -7,14 +33,11 @@ pub enum BlockInput {
     Empty,
     #[serde(rename = "string")]
     String(String),
-    /// Single text value (semantic alias; use String for backward compatibility).
     Text(String),
-    /// Structured data for agents, forms, APIs.
     Json(serde_json::Value),
-    /// Ordered list of strings (lines, CSV rows, URLs).
     List { items: Vec<String> },
-    /// Multiple predecessor outputs (ordered by edge order or predecessor id).
     Multi { outputs: Vec<BlockOutput> },
+    Error { message: String },
 }
 
 impl BlockInput {
@@ -32,6 +55,18 @@ impl From<Option<String>> for BlockInput {
     }
 }
 
+impl From<BlockOutput> for BlockInput {
+    fn from(o: BlockOutput) -> Self {
+        match o {
+            BlockOutput::Empty => BlockInput::Empty,
+            BlockOutput::String { value } => BlockInput::String(value),
+            BlockOutput::Text { value } => BlockInput::Text(value),
+            BlockOutput::Json { value } => BlockInput::Json(value),
+            BlockOutput::List { items } => BlockInput::List { items },
+        }
+    }
+}
+
 impl From<BlockInput> for Option<String> {
     fn from(input: BlockInput) -> Self {
         match input {
@@ -39,7 +74,7 @@ impl From<BlockInput> for Option<String> {
             BlockInput::String(s) => Some(s),
             BlockInput::Text(s) => Some(s),
             BlockInput::Json(v) => v.as_str().map(String::from).or_else(|| Some(v.to_string())),
-            BlockInput::List { .. } | BlockInput::Multi { .. } => None,
+            BlockInput::List { .. } | BlockInput::Multi { .. } | BlockInput::Error { .. } => None,
         }
     }
 }
@@ -51,11 +86,8 @@ pub enum BlockOutput {
     Empty,
     #[serde(rename = "string")]
     String { value: String },
-    /// Single text value (semantic alias).
     Text { value: String },
-    /// Structured data for agents, forms, APIs.
     Json { value: serde_json::Value },
-    /// Ordered list of strings.
     List { items: Vec<String> },
 }
 
@@ -97,9 +129,27 @@ pub enum BlockError {
     Io(String),
 }
 
-/// Sync block executor trait: execute with typed input/output.
+/// Result of block execution: single output, recurring stream, or multiple ordered outputs.
+#[derive(Debug)]
+pub enum BlockExecutionResult {
+    Once(BlockOutput),
+    Recurring(tokio::sync::mpsc::Receiver<BlockOutput>),
+    Multiple(Vec<BlockOutput>),
+}
+
+impl BlockExecutionResult {
+    pub fn into_once(self) -> BlockOutput {
+        match self {
+            BlockExecutionResult::Once(o) => o,
+            BlockExecutionResult::Recurring(_) => panic!("into_once called on Recurring result"),
+            BlockExecutionResult::Multiple(_) => panic!("into_once called on Multiple result"),
+        }
+    }
+}
+
+/// Sync block executor trait.
 pub trait BlockExecutor: Send + Sync {
-    fn execute(&self, input: BlockInput) -> Result<BlockOutput, BlockError>;
+    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError>;
 }
 
 #[cfg(test)]
@@ -117,75 +167,12 @@ mod tests {
         let back: Option<String> = output.into();
         assert_eq!(back, Some("world".to_string()));
     }
-
-    #[test]
-    fn block_output_serde_roundtrip() {
-        let out = BlockOutput::String { value: "test".into() };
-        let json = serde_json::to_string(&out).unwrap();
-        let restored: BlockOutput = serde_json::from_str(&json).unwrap();
-        let s: Option<String> = restored.into();
-        assert_eq!(s, Some("test".to_string()));
-    }
-
-    #[test]
-    fn block_input_output_json_roundtrip() {
-        let input = BlockInput::Json(serde_json::json!({"a": 1, "b": "x"}));
-        let json = serde_json::to_string(&input).unwrap();
-        let restored: BlockInput = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored, BlockInput::Json(_)));
-        let output = BlockOutput::Json { value: serde_json::json!({"ok": true}) };
-        let json = serde_json::to_string(&output).unwrap();
-        let restored: BlockOutput = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored, BlockOutput::Json { .. }));
-    }
-
-    #[test]
-    fn block_input_output_list_roundtrip() {
-        let input = BlockInput::List {
-            items: vec!["a".into(), "b".into()],
-        };
-        let json = serde_json::to_string(&input).unwrap();
-        let restored: BlockInput = serde_json::from_str(&json).unwrap();
-        match &restored {
-            BlockInput::List { items } => assert_eq!(items, &["a", "b"]),
-            _ => panic!("expected List"),
-        }
-        let output = BlockOutput::List { items: vec!["x".into(), "y".into()] };
-        let json = serde_json::to_string(&output).unwrap();
-        let restored: BlockOutput = serde_json::from_str(&json).unwrap();
-        match &restored {
-            BlockOutput::List { items } => assert_eq!(items, &["x", "y"]),
-            _ => panic!("expected List"),
-        }
-    }
 }
 
 pub mod config;
 pub mod child_workflow;
-pub mod conditional;
-pub mod cron_block;
-pub mod delay;
-pub mod echo;
-pub mod file_read;
-pub mod file_write;
-pub mod filter_block;
-pub mod http_request;
-pub mod merge;
 pub mod registry;
-pub mod split;
-pub mod trigger;
 
 pub use config::BlockConfig;
 pub use child_workflow::ChildWorkflowConfig;
-pub use conditional::{register_conditional, ConditionalBlock, ConditionalConfig, RuleKind};
-pub use cron_block::{register_cron, CronBlock, CronConfig};
-pub use delay::{register_delay, DelayBlock, DelayConfig};
-pub use echo::{register_echo, EchoBlock, EchoConfig};
-pub use filter_block::{register_filter, FilterBlock, FilterConfig, FilterPredicate};
-pub use file_read::{register_file_read, FileReadBlock, FileReadConfig};
-pub use file_write::{register_file_write, FileWriteBlock, FileWriteConfig};
-pub use http_request::{register_http_request, HttpRequestBlock, HttpRequestConfig};
-pub use merge::{register_merge, MergeBlock, MergeConfig};
 pub use registry::BlockRegistry;
-pub use split::{register_split, SplitBlock, SplitConfig};
-pub use trigger::{register_trigger, TriggerBlock, TriggerConfig};

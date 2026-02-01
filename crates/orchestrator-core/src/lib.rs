@@ -3,7 +3,6 @@ pub mod core;
 pub mod runtime;
 pub mod workflow;
 
-// Minimal user-facing API: Workflow, Block, BlockId, BlockOutput, BlockRegistry, RunError.
-pub use block::BlockOutput;
-pub use block::BlockRegistry;
-pub use workflow::{Block, BlockId, RunError, Workflow};
+pub use block::{BlockConfig, BlockOutput, BlockRegistry};
+pub use core::WorkflowDefinition;
+pub use workflow::{BlockId, RunError, Workflow};

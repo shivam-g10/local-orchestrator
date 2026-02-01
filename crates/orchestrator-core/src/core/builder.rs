@@ -56,9 +56,16 @@ impl WorkflowDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockConfig, FileReadConfig};
-    use std::path::PathBuf;
+    use crate::block::BlockConfig;
+    use serde_json::json;
     use uuid::Uuid;
+
+    fn file_read_config(path: &str) -> BlockConfig {
+        BlockConfig::Custom {
+            type_id: "file_read".to_string(),
+            payload: json!({ "path": path }),
+        }
+    }
 
     #[test]
     fn builder_builds_definition_with_nodes_and_edges() {
@@ -66,9 +73,9 @@ mod tests {
         let b = Uuid::new_v4();
         let c = Uuid::new_v4();
         let def = WorkflowDefinition::builder()
-            .add_node(a, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("a.txt")))))
-            .add_node(b, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("b.txt")))))
-            .add_node(c, BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("c.txt")))))
+            .add_node(a, file_read_config("a.txt"))
+            .add_node(b, file_read_config("b.txt"))
+            .add_node(c, file_read_config("c.txt"))
             .add_edge(a, b)
             .add_edge(b, c)
             .set_entry(a)

@@ -137,13 +137,16 @@ pub fn ready(def: &WorkflowDefinition, completed: &HashSet<Uuid>) -> Vec<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockConfig, FileReadConfig};
+    use crate::block::BlockConfig;
+    use serde_json::json;
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     fn node_def(path: &str) -> crate::core::NodeDef {
         crate::core::NodeDef {
-            config: BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from(path)))),
+            config: BlockConfig::Custom {
+                type_id: "file_read".to_string(),
+                payload: json!({ "path": path }),
+            },
         }
     }
 

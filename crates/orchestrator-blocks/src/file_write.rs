@@ -2,23 +2,28 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{BlockError, BlockExecutor, BlockInput, BlockOutput};
+use orchestrator_core::block::{
+    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+};
 
-/// Config for the file_write block: destination path. None means path must be supplied at run time via input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileWriteConfig {
-    pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 impl FileWriteConfig {
-    pub fn new(path: Option<impl Into<PathBuf>>) -> Self {
+    pub fn new(path: Option<impl Into<String>>) -> Self {
         Self {
             path: path.map(Into::into),
         }
     }
+
+    fn path_buf(&self) -> Option<PathBuf> {
+        self.path.as_deref().map(PathBuf::from)
+    }
 }
 
-/// Block that writes input content to a destination path.
 pub struct FileWriteBlock {
     config: FileWriteConfig,
 }
@@ -30,7 +35,7 @@ impl FileWriteBlock {
 }
 
 impl BlockExecutor for FileWriteBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockOutput, BlockError> {
+    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
         let content = match &input {
             BlockInput::String(s) => s.clone(),
             BlockInput::Text(s) => s.clone(),
@@ -45,11 +50,11 @@ impl BlockExecutor for FileWriteBlock {
                     "content required from upstream (e.g. file_read)".into(),
                 ));
             }
+            BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
         };
         let path = self
             .config
-            .path
-            .clone()
+            .path_buf()
             .ok_or_else(|| BlockError::Other("destination path required from block config".into()))?;
 
         if let Some(parent) = path.parent() {
@@ -59,28 +64,28 @@ impl BlockExecutor for FileWriteBlock {
         std::fs::write(&path, content)
             .map_err(|e| BlockError::Io(format!("{}: {}", path.display(), e)))?;
 
-        Ok(BlockOutput::empty())
+        Ok(BlockExecutionResult::Once(BlockOutput::empty()))
     }
 }
 
-/// Register the file_write block in the given registry.
-pub fn register_file_write(registry: &mut crate::block::BlockRegistry) {
-    registry.register("file_write", |config| match config {
-        crate::block::BlockConfig::FileWrite(c) => Ok(Box::new(FileWriteBlock::new(c))),
-        _ => Err(BlockError::Other("expected FileWrite config".into())),
+pub fn register_file_write(registry: &mut orchestrator_core::block::BlockRegistry) {
+    registry.register_custom("file_write", |payload| {
+        let config: FileWriteConfig = serde_json::from_value(payload)
+            .map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(FileWriteBlock::new(config)))
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::BlockInput;
 
     #[test]
     fn file_write_creates_file_with_content() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");
-        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path.clone())));
+        let path_str = path.to_string_lossy().to_string();
+        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path_str)));
         block
             .execute(BlockInput::String("written by test".into()))
             .unwrap();
@@ -92,7 +97,8 @@ mod tests {
     fn file_write_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub").join("deep").join("out.txt");
-        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path.clone())));
+        let path_str = path.to_string_lossy().to_string();
+        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path_str)));
         block
             .execute(BlockInput::String("nested".into()))
             .unwrap();
@@ -103,7 +109,8 @@ mod tests {
     fn file_write_empty_input_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");
-        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path)));
+        let path_str = path.to_string_lossy().to_string();
+        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path_str)));
         let err = block.execute(BlockInput::empty());
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("content required"));
@@ -111,9 +118,22 @@ mod tests {
 
     #[test]
     fn file_write_none_path_returns_error() {
-        let block = FileWriteBlock::new(FileWriteConfig::new(None::<PathBuf>));
+        let block = FileWriteBlock::new(FileWriteConfig::new(None::<String>));
         let err = block.execute(BlockInput::String("x".into()));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("path required"));
+    }
+
+    #[test]
+    fn file_write_error_input_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir.path().join("out.txt").to_string_lossy().to_string();
+        let block = FileWriteBlock::new(FileWriteConfig::new(Some(path_str)));
+        let input = BlockInput::Error {
+            message: "upstream failed".into(),
+        };
+        let err = block.execute(input);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("upstream failed"));
     }
 }

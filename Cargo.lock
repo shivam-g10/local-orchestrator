@@ -1176,22 +1176,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1757,12 +1741,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "orchestrator-core"
+name = "orchestrator-blocks"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "cron",
- "reqwest 0.12.28",
+ "orchestrator-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "orchestrator-core"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
  "tempfile",
@@ -1776,6 +1772,7 @@ name = "orchestrator-examples"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "orchestrator-blocks",
  "orchestrator-core",
  "polars",
  "polars_excel_writer",
@@ -2710,8 +2707,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -2720,12 +2715,9 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
- "mime",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -2737,7 +2729,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -3422,16 +3413,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]

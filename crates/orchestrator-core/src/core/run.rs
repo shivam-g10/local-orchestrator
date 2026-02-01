@@ -64,11 +64,11 @@ impl WorkflowRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockConfig, FileReadConfig};
+    use crate::block::BlockConfig;
     use crate::core::definition::NodeDef;
     use crate::core::WorkflowDefinition;
+    use serde_json::json;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     #[test]
@@ -79,7 +79,10 @@ mod tests {
             nodes: HashMap::from([(
                 node_id,
                 NodeDef {
-                    config: BlockConfig::FileRead(FileReadConfig::new(Some(PathBuf::from("README.md")))),
+                    config: BlockConfig::Custom {
+                        type_id: "file_read".to_string(),
+                        payload: json!({ "path": "README.md" }),
+                    },
                 },
             )]),
             edges: vec![],
