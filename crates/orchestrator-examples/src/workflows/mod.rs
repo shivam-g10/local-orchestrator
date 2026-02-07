@@ -11,6 +11,7 @@
 // pub mod single_file_read;
 // pub mod stock_report;
 
+pub mod ai_news_digest;
 pub mod personal_reports;
 
 // #[allow(unused_imports)]
@@ -38,4 +39,7 @@ pub mod personal_reports;
 // #[allow(unused_imports)]
 // pub use retry_until_success::run_retry_until_success_workflow;
 
+pub use ai_news_digest::{
+    ensure_dummy_data as ensure_ai_news_digest_dummy_data, run_ai_news_digest_workflow,
+};
 pub use personal_reports::{ensure_dummy_data, run_personal_reports_workflow};

@@ -31,17 +31,26 @@ pub trait FileReader: Send + Sync {
 pub struct FileReadConfig {
     #[serde(default)]
     pub path: Option<String>,
+    /// When true, always use config path and ignore upstream input.
+    #[serde(default)]
+    pub force_config_path: bool,
 }
 
 impl FileReadConfig {
     pub fn new(path: Option<impl Into<String>>) -> Self {
         Self {
             path: path.map(Into::into),
+            force_config_path: false,
         }
     }
 
     fn path_buf(&self) -> Option<PathBuf> {
         self.path.as_deref().map(PathBuf::from)
+    }
+
+    pub fn with_force_config_path(mut self, force: bool) -> Self {
+        self.force_config_path = force;
+        self
     }
 }
 
@@ -61,13 +70,18 @@ impl BlockExecutor for FileReadBlock {
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
-        let path = match &input {
-            BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-            BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-            _ => self
-                .config
+        let path = if self.config.force_config_path {
+            self.config
                 .path_buf()
-                .ok_or_else(|| BlockError::Other("path required from input or block config".into()))?,
+                .ok_or_else(|| BlockError::Other("path required from block config".into()))?
+        } else {
+            match &input {
+                BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
+                BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
+                _ => self.config.path_buf().ok_or_else(|| {
+                    BlockError::Other("path required from input or block config".into())
+                })?,
+            }
         };
         let out = self
             .reader
@@ -101,8 +115,8 @@ pub fn register_file_read(
 ) {
     let reader = Arc::clone(&reader);
     registry.register_custom("file_read", move |payload| {
-        let config: FileReadConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
+        let config: FileReadConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         Ok(Box::new(FileReadBlock::new(config, Arc::clone(&reader))))
     });
 }
@@ -117,10 +131,8 @@ mod tests {
         let path = dir.path().join("sample.txt");
         std::fs::write(&path, "hello from fixture").unwrap();
         let path_str = path.to_string_lossy().to_string();
-        let block = FileReadBlock::new(
-            FileReadConfig::new(Some(path_str)),
-            Arc::new(StdFileReader),
-        );
+        let block =
+            FileReadBlock::new(FileReadConfig::new(Some(path_str)), Arc::new(StdFileReader));
         let out = block.execute(BlockInput::empty()).unwrap().into_once();
         let s: Option<String> = out.into();
         assert_eq!(s, Some("hello from fixture".to_string()));
@@ -154,10 +166,8 @@ mod tests {
 
     #[test]
     fn file_read_none_path_and_empty_input_returns_path_required_error() {
-        let block = FileReadBlock::new(
-            FileReadConfig::new(None::<String>),
-            Arc::new(StdFileReader),
-        );
+        let block =
+            FileReadBlock::new(FileReadConfig::new(None::<String>), Arc::new(StdFileReader));
         let err = block.execute(BlockInput::empty());
         assert!(err.is_err());
         let e = err.unwrap_err();
@@ -168,15 +178,31 @@ mod tests {
     fn file_read_error_input_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path_str = dir.path().to_string_lossy().to_string();
-        let block = FileReadBlock::new(
-            FileReadConfig::new(Some(path_str)),
-            Arc::new(StdFileReader),
-        );
+        let block =
+            FileReadBlock::new(FileReadConfig::new(Some(path_str)), Arc::new(StdFileReader));
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
         let err = block.execute(input);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
+    }
+
+    #[test]
+    fn file_read_force_config_path_ignores_string_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured = dir.path().join("configured.txt");
+        std::fs::write(&configured, "configured content").unwrap();
+        let block = FileReadBlock::new(
+            FileReadConfig::new(Some(configured.to_string_lossy().to_string()))
+                .with_force_config_path(true),
+            Arc::new(StdFileReader),
+        );
+        let out = block
+            .execute(BlockInput::String("/tmp/should_not_be_used".into()))
+            .unwrap()
+            .into_once();
+        let s: Option<String> = out.into();
+        assert_eq!(s, Some("configured content".to_string()));
     }
 }

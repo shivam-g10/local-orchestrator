@@ -3,7 +3,11 @@
 //!
 //! The mailer API matches the poc: `send_email(subject, to_name, to_email, body)`.
 //! Pass your mailer when registering: `register_send_email(registry, Arc::new(your_mailer))`.
-//! Use `registry_with_mailer(mailer)` to get a registry with all built-in blocks including send_email.
+//! `default_registry()` registers `send_email` with [`EnvSmtpMailer`], which reads SMTP
+//! settings from env only when the block executes.
+//! Use `registry_with_mailer(mailer)` to override with your own implementation.
+
+mod lettre_env;
 
 use std::sync::Arc;
 
@@ -12,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
+
+pub use lettre_env::EnvSmtpMailer;
 
 /// Error from sending email.
 #[derive(Debug, Clone)]
@@ -144,11 +150,7 @@ impl BlockExecutor for SendEmailBlock {
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
-        let default_subject = self
-            .config
-            .subject
-            .as_deref()
-            .unwrap_or("");
+        let default_subject = self.config.subject.as_deref().unwrap_or("");
         let (to_email, to_name, subject, body) =
             parse_input(&input, &self.config.to, default_subject)?;
         self.mailer
@@ -167,10 +169,15 @@ pub fn register_send_email(
 ) {
     let mailer = Arc::clone(&mailer);
     registry.register_custom("send_email", move |payload| {
-        let config: SendEmailConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
+        let config: SendEmailConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         Ok(Box::new(SendEmailBlock::new(config, Arc::clone(&mailer))))
     });
+}
+
+/// Register send_email with the built-in env-based SMTP mailer.
+pub fn register_send_email_env(registry: &mut orchestrator_core::block::BlockRegistry) {
+    register_send_email(registry, Arc::new(EnvSmtpMailer));
 }
 
 #[cfg(test)]
@@ -201,7 +208,10 @@ mod tests {
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("sent"), Some(&serde_json::json!(true)));
-                assert_eq!(value.get("to"), Some(&serde_json::json!("user@example.com")));
+                assert_eq!(
+                    value.get("to"),
+                    Some(&serde_json::json!("user@example.com"))
+                );
             }
             _ => panic!("expected Once(Json)"),
         }
@@ -222,7 +232,10 @@ mod tests {
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("sent"), Some(&serde_json::json!(true)));
-                assert_eq!(value.get("to"), Some(&serde_json::json!("recipient@example.com")));
+                assert_eq!(
+                    value.get("to"),
+                    Some(&serde_json::json!("recipient@example.com"))
+                );
             }
             _ => panic!("expected Once(Json)"),
         }

@@ -18,6 +18,15 @@ pub fn successors(def: &WorkflowDefinition, from_id: Uuid) -> Vec<Uuid> {
         .collect()
 }
 
+/// Nodes that have an error edge from `from_id`.
+pub fn error_successors(def: &WorkflowDefinition, from_id: Uuid) -> Vec<Uuid> {
+    def.error_edges()
+        .iter()
+        .filter(|(from, _)| *from == from_id)
+        .map(|(_, to)| *to)
+        .collect()
+}
+
 /// Nodes that have an edge to `to_id`.
 pub fn predecessors(def: &WorkflowDefinition, to_id: Uuid) -> Vec<Uuid> {
     def.edges()
@@ -159,6 +168,7 @@ mod tests {
                 (c, node_def("c.txt")),
             ]),
             edges: vec![(a, b), (b, c)],
+            error_edges: vec![],
             entry: Some(a),
         }
     }
@@ -172,6 +182,7 @@ mod tests {
                 (right, node_def("r.txt")),
             ]),
             edges: vec![(entry, left), (entry, right)],
+            error_edges: vec![],
             entry: Some(entry),
         }
     }
@@ -185,6 +196,7 @@ mod tests {
                 (c, node_def("c.txt")),
             ]),
             edges: vec![(a, b), (b, c), (c, a)],
+            error_edges: vec![],
             entry: Some(a),
         }
     }
@@ -198,6 +210,15 @@ mod tests {
         assert_eq!(successors(&def, a), vec![b]);
         assert_eq!(successors(&def, b), vec![c]);
         assert_eq!(successors(&def, c), Vec::<Uuid>::new());
+    }
+
+    #[test]
+    fn error_successors_empty() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let def = def_with_chain(a, b, c);
+        assert!(error_successors(&def, a).is_empty());
     }
 
     #[test]
@@ -247,6 +268,7 @@ mod tests {
                 (right, node_def("right")),
             ]),
             edges: vec![(entry, left), (entry, right)],
+            error_edges: vec![],
             entry: Some(entry),
         };
         let primary = primary_sink(&def).unwrap();
@@ -255,6 +277,7 @@ mod tests {
             id: Uuid::new_v4(),
             nodes: def.nodes.clone(),
             edges: vec![(entry, left), (entry, right)],
+            error_edges: vec![],
             entry: Some(entry),
         };
         let primary2 = primary_sink(&def_last_link_right).unwrap();

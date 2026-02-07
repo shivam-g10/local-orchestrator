@@ -21,6 +21,7 @@ pub struct Workflow {
     def_id: Uuid,
     nodes: HashMap<Uuid, BlockConfig>,
     edges: Vec<(Uuid, Uuid)>,
+    error_edges: Vec<(Uuid, Uuid)>,
     entry: Option<Uuid>,
     registry: BlockRegistry,
 }
@@ -32,6 +33,7 @@ impl Workflow {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
             edges: Vec::new(),
+            error_edges: Vec::new(),
             entry: None,
             registry: BlockRegistry::new(),
         }
@@ -43,6 +45,7 @@ impl Workflow {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
             edges: Vec::new(),
+            error_edges: Vec::new(),
             entry: None,
             registry,
         }
@@ -65,11 +68,18 @@ impl Workflow {
     }
 
     /// Add a custom block (registered in the registry). Pass the same `type_id` used in [`BlockRegistry::register_custom`](crate::block::BlockRegistry::register_custom) and a config that implements `Serialize`.
-    pub fn add_custom(&mut self, type_id: &str, config: impl Serialize) -> Result<BlockId, crate::block::BlockError> {
+    pub fn add_custom(
+        &mut self,
+        type_id: &str,
+        config: impl Serialize,
+    ) -> Result<BlockId, crate::block::BlockError> {
         if type_id.trim().is_empty() {
-            return Err(crate::block::BlockError::Other("type_id must be non-empty".into()));
+            return Err(crate::block::BlockError::Other(
+                "type_id must be non-empty".into(),
+            ));
         }
-        let payload = serde_json::to_value(config).map_err(|e| crate::block::BlockError::Other(e.to_string()))?;
+        let payload = serde_json::to_value(config)
+            .map_err(|e| crate::block::BlockError::Other(e.to_string()))?;
         let id = Uuid::new_v4();
         if self.entry.is_none() {
             self.entry = Some(id);
@@ -87,6 +97,12 @@ impl Workflow {
     /// Link output of `from` to input of `to`. Optional for single-block workflows.
     pub fn link(&mut self, from: BlockId, to: BlockId) {
         self.edges.push((from.0, to.0));
+    }
+
+    /// Link error of `from` to `to`. When `from` returns an error at runtime, `to` receives
+    /// `BlockInput::Error { message }`.
+    pub fn link_on_error(&mut self, from: BlockId, to: BlockId) {
+        self.error_edges.push((from.0, to.0));
     }
 
     /// Run the workflow (sync). Blocks until complete. Returns the sink block's output or [`RunError`].
@@ -121,6 +137,7 @@ impl Workflow {
             id: self.def_id,
             nodes,
             edges: self.edges,
+            error_edges: self.error_edges,
             entry: self.entry,
         }
     }
@@ -142,6 +159,7 @@ impl Workflow {
             id: self.def_id,
             nodes,
             edges: self.edges.clone(),
+            error_edges: self.error_edges.clone(),
             entry: self.entry,
         }
     }
@@ -177,7 +195,10 @@ mod tests {
     fn file_read_registry() -> BlockRegistry {
         let mut r = BlockRegistry::new();
         r.register_custom("file_read", |payload| {
-            let path: Option<String> = payload.get("path").and_then(|v| v.as_str()).map(String::from);
+            let path: Option<String> = payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             Ok(Box::new(TestFileReadBlock {
                 path: path.map(PathBuf::from),
             }))
@@ -189,22 +210,37 @@ mod tests {
         path: Option<PathBuf>,
     }
     impl BlockExecutor for TestFileReadBlock {
-        fn execute(&self, input: BlockInput) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+        fn execute(
+            &self,
+            input: BlockInput,
+        ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
             let path = match &input {
                 BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
                 BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-                _ => self.path.clone().ok_or_else(|| crate::block::BlockError::Other("path required from input or block config".into()))?,
+                _ => self.path.clone().ok_or_else(|| {
+                    crate::block::BlockError::Other(
+                        "path required from input or block config".into(),
+                    )
+                })?,
             };
-            let s = std::fs::read_to_string(&path).map_err(|e| crate::block::BlockError::Io(format!("{}: {}", path.display(), e)))?;
-            Ok(crate::block::BlockExecutionResult::Once(BlockOutput::String { value: s }))
+            let s = std::fs::read_to_string(&path)
+                .map_err(|e| crate::block::BlockError::Io(format!("{}: {}", path.display(), e)))?;
+            Ok(crate::block::BlockExecutionResult::Once(
+                BlockOutput::String { value: s },
+            ))
         }
     }
 
     fn passthrough_registry() -> BlockRegistry {
         let mut r = BlockRegistry::new();
         r.register_custom("file_read", |payload| {
-            let path: Option<String> = payload.get("path").and_then(|v| v.as_str()).map(String::from);
-            Ok(Box::new(TestFileReadBlock { path: path.map(PathBuf::from) }))
+            let path: Option<String> = payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            Ok(Box::new(TestFileReadBlock {
+                path: path.map(PathBuf::from),
+            }))
         });
         r.register_custom("custom_transform", |_| Ok(Box::new(TestPassthroughBlock)));
         r
@@ -212,15 +248,22 @@ mod tests {
 
     struct TestPassthroughBlock;
     impl BlockExecutor for TestPassthroughBlock {
-        fn execute(&self, input: BlockInput) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+        fn execute(
+            &self,
+            input: BlockInput,
+        ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
             let output = match input {
                 BlockInput::Empty => BlockOutput::empty(),
                 BlockInput::String(s) => BlockOutput::String { value: s },
                 BlockInput::Text(s) => BlockOutput::Text { value: s },
                 BlockInput::Json(v) => BlockOutput::Json { value: v },
                 BlockInput::List { items } => BlockOutput::List { items },
-                BlockInput::Multi { outputs } => BlockOutput::Json { value: serde_json::to_value(&outputs).unwrap_or(serde_json::Value::Null) },
-                BlockInput::Error { message } => return Err(crate::block::BlockError::Other(message)),
+                BlockInput::Multi { outputs } => BlockOutput::Json {
+                    value: serde_json::to_value(&outputs).unwrap_or(serde_json::Value::Null),
+                },
+                BlockInput::Error { message } => {
+                    return Err(crate::block::BlockError::Other(message));
+                }
             };
             Ok(crate::block::BlockExecutionResult::Once(output))
         }
@@ -252,7 +295,11 @@ mod tests {
         let result = w.run();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("path required"), "expected path required error, got: {}", err);
+        assert!(
+            err.to_string().contains("path required"),
+            "expected path required error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -287,7 +334,10 @@ mod tests {
             prefix: String,
         }
         impl BlockExecutor for UppercaseBlock {
-            fn execute(&self, input: BlockInput) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+            fn execute(
+                &self,
+                input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 let s = match &input {
                     BlockInput::String(t) => t.to_uppercase(),
                     BlockInput::Text(t) => t.to_uppercase(),
@@ -300,17 +350,25 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(" ")
                         .to_uppercase(),
-                    BlockInput::Error { message } => return Err(crate::block::BlockError::Other(message.clone())),
+                    BlockInput::Error { message } => {
+                        return Err(crate::block::BlockError::Other(message.clone()));
+                    }
                 };
-                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::String {
-                    value: format!("{}{}", self.prefix, s),
-                }))
+                Ok(crate::block::BlockExecutionResult::Once(
+                    BlockOutput::String {
+                        value: format!("{}{}", self.prefix, s),
+                    },
+                ))
             }
         }
 
         let mut registry = passthrough_registry();
         registry.register_custom("uppercase", |payload| {
-            let prefix = payload.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let prefix = payload
+                .get("prefix")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             Ok(Box::new(UppercaseBlock { prefix }))
         });
 
@@ -324,7 +382,14 @@ mod tests {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
         });
-        let upper_id = w.add_custom("uppercase", UppercaseConfig { prefix: ">> ".to_string() }).unwrap();
+        let upper_id = w
+            .add_custom(
+                "uppercase",
+                UppercaseConfig {
+                    prefix: ">> ".to_string(),
+                },
+            )
+            .unwrap();
         w.link(read_id, upper_id);
 
         let output = w.run().unwrap();
@@ -380,7 +445,10 @@ mod tests {
 
         let output = w.run().unwrap();
         let s: Option<String> = output.into();
-        assert!(s.is_some(), "child (custom_transform) should return entry input");
+        assert!(
+            s.is_some(),
+            "child (custom_transform) should return entry input"
+        );
         assert_eq!(s.unwrap(), "entry content");
     }
 
@@ -454,5 +522,80 @@ mod tests {
         let output = w.run().unwrap();
         let s: Option<String> = output.into();
         assert_eq!(s, Some("from child".to_string()));
+    }
+
+    #[test]
+    fn link_on_error_runs_handler_and_run_still_fails() {
+        struct AlwaysFailBlock;
+        impl BlockExecutor for AlwaysFailBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Err(crate::block::BlockError::Other("boom".into()))
+            }
+        }
+
+        struct ErrorToFileBlock {
+            path: String,
+        }
+        impl BlockExecutor for ErrorToFileBlock {
+            fn execute(
+                &self,
+                input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let message = match input {
+                    BlockInput::Error { message } => message,
+                    _ => {
+                        return Err(crate::block::BlockError::Other(
+                            "expected BlockInput::Error".into(),
+                        ));
+                    }
+                };
+                std::fs::write(&self.path, message)
+                    .map_err(|e| crate::block::BlockError::Other(e.to_string()))?;
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let error_file = dir.path().join("error.txt");
+        let error_file_str = error_file.to_string_lossy().to_string();
+
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
+        registry.register_custom("error_to_file", |payload| {
+            let path = payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Box::new(ErrorToFileBlock { path }))
+        });
+
+        let mut w = Workflow::with_registry(registry);
+        let fail_id = w
+            .add_custom("always_fail", serde_json::json!({}))
+            .expect("add always_fail");
+        let handler_id = w
+            .add_custom(
+                "error_to_file",
+                serde_json::json!({ "path": error_file_str }),
+            )
+            .expect("add error_to_file");
+        // Keep normal graph connected for topo levels; handler is intended for on_error path.
+        w.link(fail_id, handler_id);
+        w.link_on_error(fail_id, handler_id);
+
+        let result = w.run();
+        assert!(
+            result.is_err(),
+            "run should fail even when on_error handler runs"
+        );
+        let logged = std::fs::read_to_string(&error_file).expect("error file should be written");
+        assert!(
+            logged.contains("boom"),
+            "handler should receive original error message"
+        );
     }
 }

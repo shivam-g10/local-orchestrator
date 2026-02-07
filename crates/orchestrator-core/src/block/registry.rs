@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use super::{BlockConfig, BlockError, BlockExecutor};
 
 /// Factory that builds a block instance from serialized config (custom blocks).
-pub type CustomBlockFactory = Box<dyn Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync>;
+pub type CustomBlockFactory =
+    Box<dyn Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync>;
 
 /// Registry: type_id -> factory. ChildWorkflow is handled by the runtime, not the registry.
 #[derive(Default)]
@@ -22,9 +23,13 @@ impl BlockRegistry {
     pub fn register_custom(
         &mut self,
         type_id: impl Into<String>,
-        factory: impl Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync + 'static,
+        factory: impl Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError>
+        + Send
+        + Sync
+        + 'static,
     ) {
-        self.custom_factories.insert(type_id.into(), Box::new(factory));
+        self.custom_factories
+            .insert(type_id.into(), Box::new(factory));
     }
 
     /// Get a block executor for the given config. ChildWorkflow returns an error (runtime handles it).
@@ -86,7 +91,10 @@ mod tests {
         prefix: String,
     }
     impl BlockExecutor for UpperBlock {
-        fn execute(&self, input: BlockInput) -> Result<crate::block::BlockExecutionResult, BlockError> {
+        fn execute(
+            &self,
+            input: BlockInput,
+        ) -> Result<crate::block::BlockExecutionResult, BlockError> {
             let s = match &input {
                 BlockInput::String(t) => t.to_uppercase(),
                 BlockInput::Text(t) => t.to_uppercase(),
@@ -101,9 +109,11 @@ mod tests {
                     .to_uppercase(),
                 BlockInput::Error { .. } => String::new(),
             };
-            Ok(crate::block::BlockExecutionResult::Once(BlockOutput::String {
-                value: format!("{}{}", self.prefix, s),
-            }))
+            Ok(crate::block::BlockExecutionResult::Once(
+                BlockOutput::String {
+                    value: format!("{}{}", self.prefix, s),
+                },
+            ))
         }
     }
 }

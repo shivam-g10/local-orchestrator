@@ -24,24 +24,32 @@ impl std::error::Error for FileWriteError {}
 
 /// File writer abstraction. Implement and pass when registering.
 pub trait FileWriter: Send + Sync {
-    fn write(&self, path: &Path, content: &str) -> Result<(), FileWriteError>;
+    fn write(&self, path: &Path, content: &str, append: bool) -> Result<(), FileWriteError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileWriteConfig {
     #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
+    pub append: bool,
 }
 
 impl FileWriteConfig {
     pub fn new(path: Option<impl Into<String>>) -> Self {
         Self {
             path: path.map(Into::into),
+            append: false,
         }
     }
 
     fn path_buf(&self) -> Option<std::path::PathBuf> {
         self.path.as_deref().map(std::path::PathBuf::from)
+    }
+
+    pub fn with_append(mut self, append: bool) -> Self {
+        self.append = append;
+        self
     }
 }
 
@@ -77,13 +85,12 @@ impl BlockExecutor for FileWriteBlock {
             }
             BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
         };
-        let path = self
-            .config
-            .path_buf()
-            .ok_or_else(|| BlockError::Other("destination path required from block config".into()))?;
+        let path = self.config.path_buf().ok_or_else(|| {
+            BlockError::Other("destination path required from block config".into())
+        })?;
 
         self.writer
-            .write(&path, &content)
+            .write(&path, &content, self.config.append)
             .map_err(|e| BlockError::Other(e.0))?;
 
         Ok(BlockExecutionResult::Once(BlockOutput::empty()))
@@ -94,13 +101,24 @@ impl BlockExecutor for FileWriteBlock {
 pub struct StdFileWriter;
 
 impl FileWriter for StdFileWriter {
-    fn write(&self, path: &Path, content: &str) -> Result<(), FileWriteError> {
+    fn write(&self, path: &Path, content: &str, append: bool) -> Result<(), FileWriteError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| FileWriteError(format!("create_dir_all {}: {}", path.display(), e)))?;
         }
-        std::fs::write(path, content)
-            .map_err(|e| FileWriteError(format!("{}: {}", path.display(), e)))
+        if append {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| FileWriteError(format!("{}: {}", path.display(), e)))?;
+            file.write_all(content.as_bytes())
+                .map_err(|e| FileWriteError(format!("{}: {}", path.display(), e)))
+        } else {
+            std::fs::write(path, content)
+                .map_err(|e| FileWriteError(format!("{}: {}", path.display(), e)))
+        }
     }
 }
 
@@ -111,8 +129,8 @@ pub fn register_file_write(
 ) {
     let writer = Arc::clone(&writer);
     registry.register_custom("file_write", move |payload| {
-        let config: FileWriteConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
+        let config: FileWriteConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         Ok(Box::new(FileWriteBlock::new(config, Arc::clone(&writer))))
     });
 }
@@ -146,9 +164,7 @@ mod tests {
             FileWriteConfig::new(Some(path_str)),
             Arc::new(StdFileWriter),
         );
-        block
-            .execute(BlockInput::String("nested".into()))
-            .unwrap();
+        block.execute(BlockInput::String("nested".into())).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested");
     }
 
@@ -191,5 +207,19 @@ mod tests {
         let err = block.execute(input);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
+    }
+
+    #[test]
+    fn file_write_append_appends_to_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("append.txt");
+        std::fs::write(&path, "a").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        let block = FileWriteBlock::new(
+            FileWriteConfig::new(Some(path_str)).with_append(true),
+            Arc::new(StdFileWriter),
+        );
+        block.execute(BlockInput::String("b".into())).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ab");
     }
 }

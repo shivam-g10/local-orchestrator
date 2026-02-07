@@ -17,6 +17,9 @@ pub struct WorkflowDefinition {
     pub nodes: HashMap<Uuid, NodeDef>,
     /// Edges: (from_id, to_id).
     pub edges: Vec<(Uuid, Uuid)>,
+    /// Error edges: (from_id, to_id). If `from_id` fails, `to_id` receives BlockInput::Error.
+    #[serde(default)]
+    pub error_edges: Vec<(Uuid, Uuid)>,
     /// Entry node id(s). For single-block workflows, one entry.
     #[serde(default)]
     pub entry: Option<Uuid>,
@@ -33,6 +36,10 @@ impl WorkflowDefinition {
 
     pub fn edges(&self) -> &[(Uuid, Uuid)] {
         &self.edges
+    }
+
+    pub fn error_edges(&self) -> &[(Uuid, Uuid)] {
+        &self.error_edges
     }
 
     pub fn entry(&self) -> Option<&Uuid> {
@@ -63,6 +70,7 @@ mod tests {
                 },
             )]),
             edges: vec![],
+            error_edges: vec![],
             entry: Some(node_id),
         };
         let json = serde_json::to_string(&def).unwrap();

@@ -1,4 +1,4 @@
-//! Combine block: Transform that takes multiple inputs and outputs one Json object using an injected strategy.
+//! Combine block: Transform that merges incoming values and outputs one Json object using an injected strategy.
 //! Pass your strategy when registering: `register_combine(registry, Arc::new(your_strategy))`.
 
 use std::sync::Arc;
@@ -23,7 +23,11 @@ impl std::error::Error for CombineError {}
 
 /// Combine strategy abstraction. Implement and pass when registering.
 pub trait CombineStrategy: Send + Sync {
-    fn combine(&self, keys: &[String], outputs: &[BlockOutput]) -> Result<serde_json::Value, CombineError>;
+    fn combine(
+        &self,
+        keys: &[String],
+        outputs: &[BlockOutput],
+    ) -> Result<serde_json::Value, CombineError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +47,9 @@ fn output_to_value(o: &BlockOutput) -> serde_json::Value {
         BlockOutput::String { value } => serde_json::Value::String(value.clone()),
         BlockOutput::Text { value } => serde_json::Value::String(value.clone()),
         BlockOutput::Json { value } => value.clone(),
-        BlockOutput::List { items } => serde_json::to_value(items).unwrap_or(serde_json::Value::Null),
+        BlockOutput::List { items } => {
+            serde_json::to_value(items).unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 
@@ -58,16 +64,21 @@ impl CombineBlock {
     }
 }
 
+fn input_to_outputs(input: BlockInput) -> Result<Vec<BlockOutput>, BlockError> {
+    match input {
+        BlockInput::Multi { outputs } => Ok(outputs),
+        BlockInput::Empty => Ok(vec![]),
+        BlockInput::String(value) => Ok(vec![BlockOutput::String { value }]),
+        BlockInput::Text(value) => Ok(vec![BlockOutput::Text { value }]),
+        BlockInput::Json(value) => Ok(vec![BlockOutput::Json { value }]),
+        BlockInput::List { items } => Ok(vec![BlockOutput::List { items }]),
+        BlockInput::Error { message } => Err(BlockError::Other(message)),
+    }
+}
+
 impl BlockExecutor for CombineBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        let outputs: Vec<BlockOutput> = match &input {
-            BlockInput::Multi { outputs } => outputs.clone(),
-            BlockInput::Empty => vec![],
-            BlockInput::String(_) | BlockInput::Text(_) | BlockInput::Json(_) | BlockInput::List { .. } => {
-                return Err(BlockError::Other("Combine expects Multi input".into()));
-            }
-            BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
-        };
+        let outputs = input_to_outputs(input)?;
         let value = self
             .strategy
             .combine(&self.config.keys, &outputs)
@@ -80,7 +91,11 @@ impl BlockExecutor for CombineBlock {
 pub struct KeyedCombineStrategy;
 
 impl CombineStrategy for KeyedCombineStrategy {
-    fn combine(&self, keys: &[String], outputs: &[BlockOutput]) -> Result<serde_json::Value, CombineError> {
+    fn combine(
+        &self,
+        keys: &[String],
+        outputs: &[BlockOutput],
+    ) -> Result<serde_json::Value, CombineError> {
         let mut obj = serde_json::Map::new();
         for (i, key) in keys.iter().enumerate() {
             let value = outputs
@@ -100,8 +115,8 @@ pub fn register_combine(
 ) {
     let strategy = Arc::clone(&strategy);
     registry.register_custom("combine", move |payload| {
-        let config: CombineConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
+        let config: CombineConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         Ok(Box::new(CombineBlock::new(config, Arc::clone(&strategy))))
     });
 }
@@ -116,8 +131,12 @@ mod tests {
         let block = CombineBlock::new(config, Arc::new(KeyedCombineStrategy));
         let input = BlockInput::Multi {
             outputs: vec![
-                BlockOutput::String { value: "one".into() },
-                BlockOutput::String { value: "two".into() },
+                BlockOutput::String {
+                    value: "one".into(),
+                },
+                BlockOutput::String {
+                    value: "two".into(),
+                },
             ],
         };
         let result = block.execute(input).unwrap();
@@ -132,13 +151,18 @@ mod tests {
     }
 
     #[test]
-    fn combine_rejects_single_string_input() {
+    fn combine_accepts_single_string_input() {
         let config = CombineConfig::new(vec!["x".into()]);
         let block = CombineBlock::new(config, Arc::new(KeyedCombineStrategy));
         let input = BlockInput::String("hello".into());
-        let err = block.execute(input);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("Multi"));
+        let result = block.execute(input).unwrap();
+        match result {
+            BlockExecutionResult::Once(BlockOutput::Json { value }) => {
+                let obj = value.as_object().unwrap();
+                assert_eq!(obj.get("x").and_then(|v| v.as_str()), Some("hello"));
+            }
+            _ => panic!("expected Once(Json)"),
+        }
     }
 
     #[test]

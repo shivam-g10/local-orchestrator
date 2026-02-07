@@ -80,10 +80,6 @@ impl TemplateHandlebarsBlock {
 
 impl BlockExecutor for TemplateHandlebarsBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        if let BlockInput::Error { message } = &input {
-            return Err(BlockError::Other(message.clone()));
-        }
-
         // When input is Json with key "template", use it as template string and rest as data.
         let (template, data) = match &input {
             BlockInput::Json(v) if v.is_object() => {
@@ -95,10 +91,16 @@ impl BlockExecutor for TemplateHandlebarsBlock {
                         }
                         (tpl_str.to_string(), data_obj)
                     } else {
-                        (self.config.template.as_deref().unwrap_or("").to_string(), v.clone())
+                        (
+                            self.config.template.as_deref().unwrap_or("").to_string(),
+                            v.clone(),
+                        )
                     }
                 } else {
-                    (self.config.template.as_deref().unwrap_or("").to_string(), v.clone())
+                    (
+                        self.config.template.as_deref().unwrap_or("").to_string(),
+                        v.clone(),
+                    )
                 }
             }
             _ => (
@@ -113,7 +115,7 @@ impl BlockExecutor for TemplateHandlebarsBlock {
                         .first()
                         .map(output_to_json)
                         .unwrap_or(serde_json::Value::Null),
-                    BlockInput::Error { .. } => unreachable!(),
+                    BlockInput::Error { message } => serde_json::Value::String(message.clone()),
                 },
             ),
         };
@@ -151,11 +153,13 @@ impl TemplateRenderer for HandlebarsTemplateRenderer {
         if let Some(obj) = partials.and_then(|v| v.as_object()) {
             for (name, val) in obj {
                 if let Some(s) = val.as_str() {
-                    reg.register_partial(name, s).map_err(|e| TemplateError(e.to_string()))?;
+                    reg.register_partial(name, s)
+                        .map_err(|e| TemplateError(e.to_string()))?;
                 }
             }
         }
-        reg.render_template(template, data).map_err(|e| TemplateError(e.to_string()))
+        reg.render_template(template, data)
+            .map_err(|e| TemplateError(e.to_string()))
     }
 }
 
@@ -166,9 +170,12 @@ pub fn register_template_handlebars(
 ) {
     let renderer = Arc::clone(&renderer);
     registry.register_custom("template_handlebars", move |payload| {
-        let config: TemplateHandlebarsConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(TemplateHandlebarsBlock::new(config, Arc::clone(&renderer))))
+        let config: TemplateHandlebarsConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(TemplateHandlebarsBlock::new(
+            config,
+            Arc::clone(&renderer),
+        )))
     });
 }
 
@@ -229,20 +236,28 @@ mod tests {
         let input = BlockInput::Json(serde_json::json!({"name": "world"}));
         let result = block.execute(input).unwrap();
         match result {
-            BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, "Hello world"),
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert_eq!(value, "Hello world")
+            }
             _ => panic!("expected Once(Text)"),
         }
     }
 
     #[test]
-    fn template_handlebars_error_input_returns_error() {
-        let config = TemplateHandlebarsConfig::new(None);
-        let block = TemplateHandlebarsBlock::new(config, Arc::new(TestRenderer));
+    fn template_handlebars_error_input_is_renderable() {
+        let block = TemplateHandlebarsBlock::new(
+            TemplateHandlebarsConfig::with_template("ERR: {{this}}", None),
+            Arc::new(HandlebarsTemplateRenderer),
+        );
         let input = BlockInput::Error {
             message: "upstream error".into(),
         };
-        let err = block.execute(input);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("upstream error"));
+        let out = block.execute(input).unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert!(value.contains("upstream error"));
+            }
+            _ => panic!("expected Once(Text)"),
+        }
     }
 }

@@ -35,9 +35,15 @@ pub enum BlockInput {
     String(String),
     Text(String),
     Json(serde_json::Value),
-    List { items: Vec<String> },
-    Multi { outputs: Vec<BlockOutput> },
-    Error { message: String },
+    List {
+        items: Vec<String>,
+    },
+    Multi {
+        outputs: Vec<BlockOutput>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl BlockInput {
@@ -85,10 +91,18 @@ impl From<BlockInput> for Option<String> {
 pub enum BlockOutput {
     Empty,
     #[serde(rename = "string")]
-    String { value: String },
-    Text { value: String },
-    Json { value: serde_json::Value },
-    List { items: Vec<String> },
+    String {
+        value: String,
+    },
+    Text {
+        value: String,
+    },
+    Json {
+        value: serde_json::Value,
+    },
+    List {
+        items: Vec<String>,
+    },
 }
 
 impl BlockOutput {
@@ -112,7 +126,9 @@ impl From<BlockOutput> for Option<String> {
             BlockOutput::Empty => None,
             BlockOutput::String { value: s } => Some(s),
             BlockOutput::Text { value: s } => Some(s),
-            BlockOutput::Json { value: v } => v.as_str().map(String::from).or_else(|| Some(v.to_string())),
+            BlockOutput::Json { value: v } => {
+                v.as_str().map(String::from).or_else(|| Some(v.to_string()))
+            }
             BlockOutput::List { .. } => None,
         }
     }
@@ -163,16 +179,18 @@ mod tests {
         let back: Option<String> = input.into();
         assert_eq!(back, s);
 
-        let output = BlockOutput::String { value: "world".into() };
+        let output = BlockOutput::String {
+            value: "world".into(),
+        };
         let back: Option<String> = output.into();
         assert_eq!(back, Some("world".to_string()));
     }
 }
 
-pub mod config;
 pub mod child_workflow;
+pub mod config;
 pub mod registry;
 
-pub use config::BlockConfig;
 pub use child_workflow::ChildWorkflowConfig;
+pub use config::BlockConfig;
 pub use registry::BlockRegistry;

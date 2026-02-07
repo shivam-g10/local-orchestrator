@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
-use crate::block::BlockConfig;
 use super::{NodeDef, WorkflowDefinition};
+use crate::block::BlockConfig;
 
 /// Fluent builder for WorkflowDefinition. Uses strongly-typed BlockConfig only.
 #[derive(Debug, Default)]
@@ -9,6 +9,7 @@ pub struct WorkflowDefinitionBuilder {
     id: Uuid,
     nodes: std::collections::HashMap<Uuid, NodeDef>,
     edges: Vec<(Uuid, Uuid)>,
+    error_edges: Vec<(Uuid, Uuid)>,
     entry: Option<Uuid>,
 }
 
@@ -18,6 +19,7 @@ impl WorkflowDefinitionBuilder {
             id: Uuid::new_v4(),
             nodes: std::collections::HashMap::new(),
             edges: Vec::new(),
+            error_edges: Vec::new(),
             entry: None,
         }
     }
@@ -32,6 +34,11 @@ impl WorkflowDefinitionBuilder {
         self
     }
 
+    pub fn add_error_edge(mut self, from: Uuid, to: Uuid) -> Self {
+        self.error_edges.push((from, to));
+        self
+    }
+
     pub fn set_entry(mut self, entry: Uuid) -> Self {
         self.entry = Some(entry);
         self
@@ -42,6 +49,7 @@ impl WorkflowDefinitionBuilder {
             id: self.id,
             nodes: self.nodes,
             edges: self.edges,
+            error_edges: self.error_edges,
             entry: self.entry,
         }
     }
@@ -78,14 +86,19 @@ mod tests {
             .add_node(c, file_read_config("c.txt"))
             .add_edge(a, b)
             .add_edge(b, c)
+            .add_error_edge(c, a)
             .set_entry(a)
             .build();
 
         assert_eq!(def.nodes().len(), 3);
         assert_eq!(def.edges().len(), 2);
+        assert_eq!(def.error_edges().len(), 1);
         assert_eq!(def.entry(), Some(&a));
         assert!(def.nodes().get(&a).is_some());
-        assert_eq!(def.nodes().get(&a).unwrap().config.block_type(), "file_read");
+        assert_eq!(
+            def.nodes().get(&a).unwrap().config.block_type(),
+            "file_read"
+        );
         assert!(def.edges().contains(&(a, b)));
         assert!(def.edges().contains(&(b, c)));
     }

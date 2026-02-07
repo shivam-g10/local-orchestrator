@@ -65,8 +65,8 @@ impl WorkflowRun {
 mod tests {
     use super::*;
     use crate::block::BlockConfig;
-    use crate::core::definition::NodeDef;
     use crate::core::WorkflowDefinition;
+    use crate::core::definition::NodeDef;
     use serde_json::json;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -86,6 +86,7 @@ mod tests {
                 },
             )]),
             edges: vec![],
+            error_edges: vec![],
             entry: Some(node_id),
         };
         let run = WorkflowRun::new(&def);
