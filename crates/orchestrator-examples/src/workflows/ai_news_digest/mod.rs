@@ -21,6 +21,22 @@ fn run_error(msg: impl Into<String>) -> RunError {
     RunError::Block(BlockError::Other(msg.into()))
 }
 
+fn is_no_new_items_error(err: &RunError) -> bool {
+    match err {
+        RunError::Block(BlockError::Other(message)) => {
+            serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|v| {
+                    v.get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|k| k == "no_new_items")
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 fn load_dotenv_for_example() {
     if let Ok(canon) = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(".env")
@@ -40,22 +56,35 @@ struct RegistryDeps {
 }
 
 /// Ensure dummy files for the ai_news_digest workflow under `base_path`.
+fn write_if_missing(path: &Path, contents: &str) -> Result<(), std::io::Error> {
+    if !path.exists() {
+        std::fs::write(path, contents)?;
+    }
+    Ok(())
+}
+
+/// Ensure dummy files for the ai_news_digest workflow under `base_path`.
 pub fn ensure_dummy_data(base_path: &Path) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(base_path)?;
     std::fs::create_dir_all(base_path.join("templates"))?;
     std::fs::create_dir_all(base_path.join("state"))?;
     std::fs::create_dir_all(base_path.join("logs"))?;
 
-    std::fs::write(
-        base_path.join("feeds.txt"),
-        "https://hnrss.org/frontpage\nhttps://www.reddit.com/r/rust/.rss\n",
-    )?;
-    std::fs::write(
-        base_path.join("prompt.md"),
+    let default_feeds = concat!(
+        "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml\n",
+        "https://indianexpress.com/section/india/feed/\n",
+        "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms\n",
+        "https://www.thehindu.com/news/national/feeder/default.rss\n",
+        "https://www.news18.com/rss/india.xml\n",
+        "https://www.firstpost.com/commonfeeds/v1/mfp/rss/india.xml\n",
+    );
+    write_if_missing(&base_path.join("feeds.txt"), default_feeds)?;
+    write_if_missing(
+        &base_path.join("prompt.md"),
         "You are preparing an inshorts-style digest.\nFor each item, write 2-3 concise bullets.\nReturn markdown only.\n",
     )?;
-    std::fs::write(
-        base_path.join("email_template.hbs"),
+    write_if_missing(
+        &base_path.join("email_template.hbs"),
         r##"<!DOCTYPE html>
 <html>
 <body bgcolor="#f3f4f6" style="margin:0; padding:0; background-color:#f3f4f6;">
@@ -93,44 +122,44 @@ pub fn ensure_dummy_data(base_path: &Path) -> Result<(), std::io::Error> {
 "##,
     )?;
 
-    std::fs::write(
-        base_path.join("templates").join("merged.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("merged.hbs"),
         "==== merged_feeds ====\n{{{this}}}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("dedupe.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("dedupe.hbs"),
         "{\"event\":\"dedupe\",\"new_count\":{{new_count}},\"total_count\":{{total_count}},\"skipped_count\":{{skipped_count}}}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("ai_markdown.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("ai_markdown.hbs"),
         "==== ai_markdown ====\n{{{this}}}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("email_html.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("email_html.hbs"),
         "==== email_html ====\n{{{this}}}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("send.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("send.hbs"),
         "{\"event\":\"send\",\"sent\":{{sent}},\"to\":\"{{to}}\"}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("error.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("error.hbs"),
         "{\"event\":\"error\",\"message\":\"{{this}}\"}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("run_skip.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("run_skip.hbs"),
         "{\"kind\":\"skip\",\"message\":\"{{this}}\"}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("run_error.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("run_error.hbs"),
         "{\"kind\":\"error\",\"message\":\"{{this}}\"}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("run_success.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("run_success.hbs"),
         "{\"kind\":\"success\",\"ts\":\"{{run_ts}}\",\"new_count\":{{dedupe.new_count}},\"sent\":{{send.sent}}}\n",
     )?;
-    std::fs::write(
-        base_path.join("templates").join("sent_items.hbs"),
+    write_if_missing(
+        &base_path.join("templates").join("sent_items.hbs"),
         "{{#if send.sent}}\n{{#each dedupe.new_ids}}{\"id\":\"{{this}}\",\"sent_at\":\"{{../run_ts}}\"}\n{{/each}}{{/if}}",
     )?;
     Ok(())
@@ -215,41 +244,62 @@ fn add_error_link(
     Ok(())
 }
 
-fn run_with_deps(
-    deps: RegistryDeps,
-    feeds_file: &Path,
-    prompt_file: &Path,
-    email_template_path: &Path,
-    template_dir: &Path,
-    state_dir: &Path,
-    logs_dir: &Path,
-    cron_expr: &str,
-    to_email: &str,
-    subject: &str,
-    model: &str,
-    api_key_env: Option<&str>,
+struct RunWithDepsConfig<'a> {
+    feeds_file: &'a Path,
+    prompt_file: &'a Path,
+    email_template_path: &'a Path,
+    template_dir: &'a Path,
+    state_dir: &'a Path,
+    logs_dir: &'a Path,
+    cron_expr: &'a str,
+    to_email: &'a str,
+    subject: &'a str,
+    model: &'a str,
+    api_key_env: Option<&'a str>,
     max_items: usize,
     use_cron: bool,
-) -> Result<(), RunError> {
-    let prompt = std::fs::read_to_string(prompt_file)
-        .map_err(|e| run_error(format!("read prompt file {}: {}", prompt_file.display(), e)))?;
-    let urls = read_urls(feeds_file)?;
+}
+
+pub struct AiNewsDigestWorkflowConfig<'a> {
+    pub feeds_file: &'a Path,
+    pub prompt_file: &'a Path,
+    pub email_template_path: &'a Path,
+    pub template_dir: &'a Path,
+    pub state_dir: &'a Path,
+    pub logs_dir: &'a Path,
+    pub cron_expr: &'a str,
+    pub to_email: &'a str,
+    pub subject: &'a str,
+    pub model: &'a str,
+    pub api_key_env: Option<&'a str>,
+    pub max_items: usize,
+}
+
+fn run_with_deps(deps: RegistryDeps, cfg: RunWithDepsConfig<'_>) -> Result<(), RunError> {
+    let prompt = std::fs::read_to_string(cfg.prompt_file).map_err(|e| {
+        run_error(format!(
+            "read prompt file {}: {}",
+            cfg.prompt_file.display(),
+            e
+        ))
+    })?;
+    let urls = read_urls(cfg.feeds_file)?;
     if urls.is_empty() {
         return Err(run_error("feeds file has no URLs"));
     }
 
-    let sent_items_path = state_dir.join("sent_items.jsonl");
-    let runs_path = state_dir.join("runs.jsonl");
-    let registry = build_registry(&deps, &sent_items_path, max_items);
+    let sent_items_path = cfg.state_dir.join("sent_items.jsonl");
+    let runs_path = cfg.state_dir.join("runs.jsonl");
+    let registry = build_registry(&deps, &sent_items_path, cfg.max_items);
     let mut w = Workflow::with_registry(registry);
 
-    let trigger_id = if use_cron {
-        w.add(Block::cron(cron_expr))
+    let trigger_id = if cfg.use_cron {
+        w.add(Block::cron(cfg.cron_expr))
     } else {
         w.add(Block::custom_transform(None::<String>))
     };
     let read_feeds_id = w.add(Block::file_read_force_config(Some(
-        feeds_file.to_string_lossy().as_ref(),
+        cfg.feeds_file.to_string_lossy().as_ref(),
     )));
     let split_id = w.add(Block::split_lines());
     w.link(trigger_id, read_feeds_id);
@@ -266,25 +316,25 @@ fn run_with_deps(
         add_error_link(
             &mut w,
             http_id,
-            &template_dir.join("error.hbs"),
-            &logs_dir.join("errors.log"),
+            &cfg.template_dir.join("error.hbs"),
+            &cfg.logs_dir.join("errors.log"),
         )?;
         add_error_link(
             &mut w,
             http_id,
-            &template_dir.join("run_error.hbs"),
+            &cfg.template_dir.join("run_error.hbs"),
             &runs_path,
         )?;
         add_error_link(
             &mut w,
             parse_id,
-            &template_dir.join("error.hbs"),
-            &logs_dir.join("errors.log"),
+            &cfg.template_dir.join("error.hbs"),
+            &cfg.logs_dir.join("errors.log"),
         )?;
         add_error_link(
             &mut w,
             parse_id,
-            &template_dir.join("run_error.hbs"),
+            &cfg.template_dir.join("run_error.hbs"),
             &runs_path,
         )?;
     }
@@ -299,8 +349,8 @@ fn run_with_deps(
     add_audit_link(
         &mut w,
         merge_id,
-        &template_dir.join("merged.hbs"),
-        &logs_dir.join("merged.log"),
+        &cfg.template_dir.join("merged.hbs"),
+        &cfg.logs_dir.join("merged.log"),
     )?;
 
     let dedupe_id = w
@@ -310,45 +360,45 @@ fn run_with_deps(
     add_audit_link(
         &mut w,
         dedupe_id,
-        &template_dir.join("dedupe.hbs"),
-        &logs_dir.join("dedupe.log"),
+        &cfg.template_dir.join("dedupe.hbs"),
+        &cfg.logs_dir.join("dedupe.log"),
     )?;
     add_error_link(
         &mut w,
         dedupe_id,
-        &template_dir.join("run_skip.hbs"),
+        &cfg.template_dir.join("run_skip.hbs"),
         &runs_path,
     )?;
     add_error_link(
         &mut w,
         dedupe_id,
-        &template_dir.join("error.hbs"),
-        &logs_dir.join("errors.log"),
+        &cfg.template_dir.join("error.hbs"),
+        &cfg.logs_dir.join("errors.log"),
     )?;
 
     let ai_id = w.add(Block::ai_generate(
         prompt,
         Some("openai"),
-        Some(model),
-        Some(api_key_env.unwrap_or("OPENAI_API_KEY")),
+        Some(cfg.model),
+        Some(cfg.api_key_env.unwrap_or("OPENAI_API_KEY")),
     ));
     w.link(dedupe_id, ai_id);
     add_audit_link(
         &mut w,
         ai_id,
-        &template_dir.join("ai_markdown.hbs"),
-        &logs_dir.join("ai_markdown.log"),
+        &cfg.template_dir.join("ai_markdown.hbs"),
+        &cfg.logs_dir.join("ai_markdown.log"),
     )?;
     add_error_link(
         &mut w,
         ai_id,
-        &template_dir.join("error.hbs"),
-        &logs_dir.join("errors.log"),
+        &cfg.template_dir.join("error.hbs"),
+        &cfg.logs_dir.join("errors.log"),
     )?;
     add_error_link(
         &mut w,
         ai_id,
-        &template_dir.join("run_error.hbs"),
+        &cfg.template_dir.join("run_error.hbs"),
         &runs_path,
     )?;
 
@@ -356,15 +406,15 @@ fn run_with_deps(
     w.link(ai_id, markdown_id);
 
     let read_email_template_id = w.add(Block::file_read_force_config(Some(
-        email_template_path.to_string_lossy().as_ref(),
+        cfg.email_template_path.to_string_lossy().as_ref(),
     )));
     // Link from Json-producing block to avoid overriding file_read path from string input.
     w.link(dedupe_id, read_email_template_id);
     add_error_link(
         &mut w,
         read_email_template_id,
-        &template_dir.join("error.hbs"),
-        &logs_dir.join("errors.log"),
+        &cfg.template_dir.join("error.hbs"),
+        &cfg.logs_dir.join("errors.log"),
     )?;
 
     let combine_email_id = w.add(Block::combine(vec![
@@ -379,34 +429,34 @@ fn run_with_deps(
     add_audit_link(
         &mut w,
         render_email_id,
-        &template_dir.join("email_html.hbs"),
-        &logs_dir.join("email_html.log"),
+        &cfg.template_dir.join("email_html.hbs"),
+        &cfg.logs_dir.join("email_html.log"),
     )?;
     add_error_link(
         &mut w,
         render_email_id,
-        &template_dir.join("error.hbs"),
-        &logs_dir.join("errors.log"),
+        &cfg.template_dir.join("error.hbs"),
+        &cfg.logs_dir.join("errors.log"),
     )?;
 
-    let send_id = w.add(Block::send_email(to_email, Some(subject)));
+    let send_id = w.add(Block::send_email(cfg.to_email, Some(cfg.subject)));
     w.link(render_email_id, send_id);
     add_audit_link(
         &mut w,
         send_id,
-        &template_dir.join("send.hbs"),
-        &logs_dir.join("send.log"),
+        &cfg.template_dir.join("send.hbs"),
+        &cfg.logs_dir.join("send.log"),
     )?;
     add_error_link(
         &mut w,
         send_id,
-        &template_dir.join("error.hbs"),
-        &logs_dir.join("errors.log"),
+        &cfg.template_dir.join("error.hbs"),
+        &cfg.logs_dir.join("errors.log"),
     )?;
     add_error_link(
         &mut w,
         send_id,
-        &template_dir.join("run_error.hbs"),
+        &cfg.template_dir.join("run_error.hbs"),
         &runs_path,
     )?;
 
@@ -422,51 +472,43 @@ fn run_with_deps(
     add_audit_link(
         &mut w,
         combine_post_send_id,
-        &template_dir.join("sent_items.hbs"),
+        &cfg.template_dir.join("sent_items.hbs"),
         &sent_items_path,
     )?;
     add_audit_link(
         &mut w,
         combine_post_send_id,
-        &template_dir.join("run_success.hbs"),
+        &cfg.template_dir.join("run_success.hbs"),
         &runs_path,
     )?;
 
-    w.run()?;
-    Ok(())
+    match w.run() {
+        Ok(_) => Ok(()),
+        Err(err) if is_no_new_items_error(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Run ai_news_digest workflow with built-in default registry implementations.
-pub fn run_ai_news_digest_workflow(
-    feeds_file: &Path,
-    prompt_file: &Path,
-    email_template_path: &Path,
-    template_dir: &Path,
-    state_dir: &Path,
-    logs_dir: &Path,
-    cron_expr: &str,
-    to_email: &str,
-    subject: &str,
-    model: &str,
-    api_key_env: Option<&str>,
-    max_items: usize,
-) -> Result<(), RunError> {
+pub fn run_ai_news_digest_workflow(cfg: AiNewsDigestWorkflowConfig<'_>) -> Result<(), RunError> {
     load_dotenv_for_example();
     run_with_deps(
         RegistryDeps::default(),
-        feeds_file,
-        prompt_file,
-        email_template_path,
-        template_dir,
-        state_dir,
-        logs_dir,
-        cron_expr,
-        to_email,
-        subject,
-        model,
-        api_key_env,
-        max_items,
-        true,
+        RunWithDepsConfig {
+            feeds_file: cfg.feeds_file,
+            prompt_file: cfg.prompt_file,
+            email_template_path: cfg.email_template_path,
+            template_dir: cfg.template_dir,
+            state_dir: cfg.state_dir,
+            logs_dir: cfg.logs_dir,
+            cron_expr: cfg.cron_expr,
+            to_email: cfg.to_email,
+            subject: cfg.subject,
+            model: cfg.model,
+            api_key_env: cfg.api_key_env,
+            max_items: cfg.max_items,
+            use_cron: true,
+        },
     )
 }
 
@@ -559,19 +601,21 @@ mod tests {
 
         let first = run_with_deps(
             deps,
-            &feeds_file,
-            &prompt_file,
-            &email_template,
-            &template_dir,
-            &state_dir,
-            &logs_dir,
-            "* * * * * * *",
-            "test@example.com",
-            "Digest",
-            "gpt-5-nano",
-            Some("NO_KEY_NEEDED"),
-            10,
-            false,
+            RunWithDepsConfig {
+                feeds_file: &feeds_file,
+                prompt_file: &prompt_file,
+                email_template_path: &email_template,
+                template_dir: &template_dir,
+                state_dir: &state_dir,
+                logs_dir: &logs_dir,
+                cron_expr: "* * * * * * *",
+                to_email: "test@example.com",
+                subject: "Digest",
+                model: "gpt-5-nano",
+                api_key_env: Some("NO_KEY_NEEDED"),
+                max_items: 10,
+                use_cron: false,
+            },
         );
         assert!(first.is_ok(), "first run failed: {:?}", first.err());
         assert!(email_out.exists());
@@ -586,26 +630,32 @@ mod tests {
         };
         let second = run_with_deps(
             deps2,
-            &feeds_file,
-            &prompt_file,
-            &email_template,
-            &template_dir,
-            &state_dir,
-            &logs_dir,
-            "* * * * * * *",
-            "test@example.com",
-            "Digest",
-            "gpt-5-nano",
-            Some("NO_KEY_NEEDED"),
-            10,
-            false,
+            RunWithDepsConfig {
+                feeds_file: &feeds_file,
+                prompt_file: &prompt_file,
+                email_template_path: &email_template,
+                template_dir: &template_dir,
+                state_dir: &state_dir,
+                logs_dir: &logs_dir,
+                cron_expr: "* * * * * * *",
+                to_email: "test@example.com",
+                subject: "Digest",
+                model: "gpt-5-nano",
+                api_key_env: Some("NO_KEY_NEEDED"),
+                max_items: 10,
+                use_cron: false,
+            },
         );
         assert!(
-            second.is_err(),
-            "second run should fail on no_new_items path"
+            second.is_ok(),
+            "second run should skip without returning error: {:?}",
+            second.err()
         );
         let runs = std::fs::read_to_string(state_dir.join("runs.jsonl")).unwrap();
         assert!(runs.contains("\"kind\":\"skip\""), "runs log: {}", runs);
+        let send = std::fs::read_to_string(logs_dir.join("send.log")).unwrap();
+        let send_lines = send.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(send_lines, 1, "expected only first run to send email");
     }
 
     #[test]
@@ -633,19 +683,21 @@ mod tests {
 
         let run = run_with_deps(
             deps,
-            &feeds_file,
-            &prompt_file,
-            &email_template,
-            &template_dir,
-            &state_dir,
-            &logs_dir,
-            "* * * * * * *",
-            "test@example.com",
-            "Digest",
-            "gpt-5-nano",
-            Some("NO_KEY_NEEDED"),
-            10,
-            false,
+            RunWithDepsConfig {
+                feeds_file: &feeds_file,
+                prompt_file: &prompt_file,
+                email_template_path: &email_template,
+                template_dir: &template_dir,
+                state_dir: &state_dir,
+                logs_dir: &logs_dir,
+                cron_expr: "* * * * * * *",
+                to_email: "test@example.com",
+                subject: "Digest",
+                model: "gpt-5-nano",
+                api_key_env: Some("NO_KEY_NEEDED"),
+                max_items: 10,
+                use_cron: false,
+            },
         );
         assert!(run.is_ok(), "single-feed run failed: {:?}", run.err());
 
@@ -677,19 +729,21 @@ mod tests {
 
         let run = run_with_deps(
             deps,
-            &feeds_file,
-            &prompt_file,
-            &email_template,
-            &template_dir,
-            &state_dir,
-            &logs_dir,
-            "* * * * * * *",
-            "test@example.com",
-            "Digest",
-            "gpt-5-nano",
-            Some("INTENTIONALLY_MISSING_AI_KEY"),
-            10,
-            false,
+            RunWithDepsConfig {
+                feeds_file: &feeds_file,
+                prompt_file: &prompt_file,
+                email_template_path: &email_template,
+                template_dir: &template_dir,
+                state_dir: &state_dir,
+                logs_dir: &logs_dir,
+                cron_expr: "* * * * * * *",
+                to_email: "test@example.com",
+                subject: "Digest",
+                model: "gpt-5-nano",
+                api_key_env: Some("INTENTIONALLY_MISSING_AI_KEY"),
+                max_items: 10,
+                use_cron: false,
+            },
         );
         assert!(run.is_err(), "run should fail when API key is missing");
 

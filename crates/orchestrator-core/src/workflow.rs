@@ -598,4 +598,90 @@ mod tests {
             "handler should receive original error message"
         );
     }
+
+    #[test]
+    fn recurring_no_new_items_error_skips_tick_and_continues() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct TwoTickEntryBlock;
+        impl BlockExecutor for TwoTickEntryBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let (tx, rx) = tokio::sync::mpsc::channel(4);
+                tokio::runtime::Handle::current().spawn(async move {
+                    let _ = tx
+                        .send(BlockOutput::Text {
+                            value: "tick-1".to_string(),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(BlockOutput::Text {
+                            value: "tick-2".to_string(),
+                        })
+                        .await;
+                });
+                Ok(crate::block::BlockExecutionResult::Recurring(rx))
+            }
+        }
+
+        struct SkipThenPassBlock {
+            calls: Arc<AtomicUsize>,
+        }
+        impl BlockExecutor for SkipThenPassBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call_index == 0 {
+                    return Err(crate::block::BlockError::Other(
+                        serde_json::json!({
+                            "kind": "no_new_items",
+                            "total_count": 2,
+                            "skipped_count": 2
+                        })
+                        .to_string(),
+                    ));
+                }
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Text {
+                    value: "ok".to_string(),
+                }))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("two_tick_entry", |_| Ok(Box::new(TwoTickEntryBlock)));
+        let calls_for_block = Arc::clone(&calls);
+        registry.register_custom("skip_then_pass", move |_| {
+            Ok(Box::new(SkipThenPassBlock {
+                calls: Arc::clone(&calls_for_block),
+            }))
+        });
+
+        let mut w = Workflow::with_registry(registry);
+        let entry_id = w
+            .add_custom("two_tick_entry", serde_json::json!({}))
+            .expect("add two_tick_entry");
+        let sink_id = w
+            .add_custom("skip_then_pass", serde_json::json!({}))
+            .expect("add skip_then_pass");
+        w.link(entry_id, sink_id);
+
+        let out = w
+            .run()
+            .expect("recurring workflow should continue after no_new_items");
+        let as_text: Option<String> = out.into();
+        assert_eq!(as_text, Some("ok".to_string()));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expected block to run on both recurring ticks"
+        );
+    }
 }

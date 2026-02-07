@@ -341,20 +341,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let logs = logs_dir
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| base.join("logs"));
-            workflows::run_ai_news_digest_workflow(
-                &feeds,
-                &prompt,
-                &email_tpl,
-                &templates,
-                &state,
-                &logs,
-                &cron,
-                &to,
-                &subject,
-                &model,
-                api_key_env.as_deref(),
+            workflows::run_ai_news_digest_workflow(workflows::AiNewsDigestWorkflowConfig {
+                feeds_file: &feeds,
+                prompt_file: &prompt,
+                email_template_path: &email_tpl,
+                template_dir: &templates,
+                state_dir: &state,
+                logs_dir: &logs,
+                cron_expr: &cron,
+                to_email: &to,
+                subject: &subject,
+                model: &model,
+                api_key_env: api_key_env.as_deref(),
                 max_items,
-            )?;
+            })?;
             println!(
                 "AI news digest workflow completed. State/logs are under {}",
                 base.display()

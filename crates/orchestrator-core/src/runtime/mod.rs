@@ -196,6 +196,18 @@ pub enum RuntimeError {
     IterationBudgetExceeded,
 }
 
+fn is_no_new_items_runtime_error(err: &RuntimeError) -> bool {
+    match err {
+        RuntimeError::Block(BlockError::Other(message)) => {
+            serde_json::from_str::<serde_json::Value>(message)
+                .ok()
+                .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(|k| k == "no_new_items"))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 /// Run a workflow (single-block or multi-block DAG). Async entrypoint used by run() and run_async().
 /// When `entry_input` is Some, the entry node receives that input instead of empty.
 pub async fn run_workflow(
@@ -309,7 +321,6 @@ pub async fn run_workflow(
                         run,
                         registry,
                         sink_id,
-                        nodes,
                         remaining_levels,
                         &mut outputs,
                         &mut multi_outputs,
@@ -335,7 +346,6 @@ pub async fn run_workflow(
                             run,
                             registry,
                             sink_id,
-                            nodes,
                             remaining_levels,
                             &mut outputs,
                             &mut multi_outputs,
@@ -344,6 +354,9 @@ pub async fn run_workflow(
                         {
                             Ok(out) => out,
                             Err(err) => {
+                                if is_no_new_items_runtime_error(&err) {
+                                    continue;
+                                }
                                 set_run_failed(run, &err);
                                 return Err(err);
                             }
@@ -379,11 +392,11 @@ async fn run_remaining_levels(
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
     sink_id: Uuid,
-    nodes: &HashMap<Uuid, crate::core::NodeDef>,
     levels: &[Vec<Uuid>],
     outputs: &mut HashMap<Uuid, BlockOutput>,
     multi_outputs: &mut MultiOutputs,
 ) -> Result<BlockOutput, RuntimeError> {
+    let nodes = def.nodes();
     let mut last_completed_id: Option<Uuid> = None;
     for level_nodes in levels {
         let mut joins: Vec<(Uuid, Option<JoinHandleBlock>)> = Vec::with_capacity(level_nodes.len());
@@ -407,11 +420,7 @@ async fn run_remaining_levels(
                     Ok(out) => out,
                     Err(e) => {
                         let msg = e.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, *node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, *node_id, &msg).await?;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 };
@@ -431,21 +440,13 @@ async fn run_remaining_levels(
                     Ok(Ok(result)) => result,
                     Ok(Err(err)) => {
                         let msg = err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(err));
                     }
                     Err(e) => {
                         let block_err = BlockError::Other(e.to_string());
                         let msg = block_err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(block_err));
                     }
                 };
@@ -465,11 +466,7 @@ async fn run_remaining_levels(
                     }
                     BlockExecutionResult::Recurring(_) => {
                         let msg = "Recurring only supported for entry block".to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 }
@@ -538,11 +535,7 @@ async fn run_workflow_iteration(
                     Ok(out) => out,
                     Err(e) => {
                         let msg = e.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 };
@@ -554,11 +547,7 @@ async fn run_workflow_iteration(
                     Ok(b) => b,
                     Err(err) => {
                         let msg = err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(err));
                     }
                 };
@@ -566,21 +555,13 @@ async fn run_workflow_iteration(
                     Ok(Ok(r)) => r,
                     Ok(Err(err)) => {
                         let msg = err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(err));
                     }
                     Err(e) => {
                         let block_err = BlockError::Other(e.to_string());
                         let msg = block_err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(RuntimeError::Block(block_err));
                     }
                 };
@@ -588,11 +569,7 @@ async fn run_workflow_iteration(
                     Ok(out) => out,
                     Err(err) => {
                         let msg = err.to_string();
-                        if let Err(handler_err) =
-                            run_error_handlers(def, run, registry, node_id, &msg).await
-                        {
-                            return Err(handler_err);
-                        }
+                        run_error_handlers(def, run, registry, node_id, &msg).await?;
                         return Err(err);
                     }
                 };
