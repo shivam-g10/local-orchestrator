@@ -23,7 +23,11 @@ impl std::error::Error for SplitByKeysError {}
 
 /// Split-by-keys strategy abstraction. Implement and pass when registering.
 pub trait SplitByKeysStrategy: Send + Sync {
-    fn split(&self, keys: &[String], obj: &serde_json::Value) -> Result<Vec<BlockOutput>, SplitByKeysError>;
+    fn split(
+        &self,
+        keys: &[String],
+        obj: &serde_json::Value,
+    ) -> Result<Vec<BlockOutput>, SplitByKeysError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,11 +56,17 @@ impl BlockExecutor for SplitByKeysBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
         let obj = match &input {
             BlockInput::Json(v) => v.clone(),
-            BlockInput::String(s) => serde_json::from_str(s).map_err(|e| BlockError::Other(e.to_string()))?,
-            BlockInput::Text(s) => serde_json::from_str(s).map_err(|e| BlockError::Other(e.to_string()))?,
+            BlockInput::String(s) => {
+                serde_json::from_str(s).map_err(|e| BlockError::Other(e.to_string()))?
+            }
+            BlockInput::Text(s) => {
+                serde_json::from_str(s).map_err(|e| BlockError::Other(e.to_string()))?
+            }
             BlockInput::Empty => serde_json::json!({}),
             BlockInput::List { .. } | BlockInput::Multi { .. } => {
-                return Err(BlockError::Other("SplitByKeys expects Json or string object".into()));
+                return Err(BlockError::Other(
+                    "SplitByKeys expects Json or string object".into(),
+                ));
             }
             BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
         };
@@ -75,7 +85,11 @@ impl BlockExecutor for SplitByKeysBlock {
 pub struct KeyExtractSplitStrategy;
 
 impl SplitByKeysStrategy for KeyExtractSplitStrategy {
-    fn split(&self, keys: &[String], obj: &serde_json::Value) -> Result<Vec<BlockOutput>, SplitByKeysError> {
+    fn split(
+        &self,
+        keys: &[String],
+        obj: &serde_json::Value,
+    ) -> Result<Vec<BlockOutput>, SplitByKeysError> {
         let obj = obj
             .as_object()
             .ok_or_else(|| SplitByKeysError("SplitByKeys expects a JSON object".into()))?;
@@ -97,9 +111,12 @@ pub fn register_split_by_keys(
 ) {
     let strategy = Arc::clone(&strategy);
     registry.register_custom("split_by_keys", move |payload| {
-        let config: SplitByKeysConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SplitByKeysBlock::new(config, Arc::clone(&strategy))))
+        let config: SplitByKeysConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(SplitByKeysBlock::new(
+            config,
+            Arc::clone(&strategy),
+        )))
     });
 }
 
@@ -116,9 +133,24 @@ mod tests {
         match result {
             BlockExecutionResult::Multiple(outs) => {
                 assert_eq!(outs.len(), 3);
-                assert_eq!(outs[0], BlockOutput::Json { value: serde_json::json!(1) });
-                assert_eq!(outs[1], BlockOutput::Json { value: serde_json::json!("two") });
-                assert_eq!(outs[2], BlockOutput::Json { value: serde_json::json!(true) });
+                assert_eq!(
+                    outs[0],
+                    BlockOutput::Json {
+                        value: serde_json::json!(1)
+                    }
+                );
+                assert_eq!(
+                    outs[1],
+                    BlockOutput::Json {
+                        value: serde_json::json!("two")
+                    }
+                );
+                assert_eq!(
+                    outs[2],
+                    BlockOutput::Json {
+                        value: serde_json::json!(true)
+                    }
+                );
             }
             _ => panic!("expected Multiple"),
         }

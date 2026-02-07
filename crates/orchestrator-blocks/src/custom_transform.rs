@@ -90,9 +90,12 @@ pub fn register_custom_transform(
 ) {
     let transform = Arc::clone(&transform);
     registry.register_custom("custom_transform", move |payload| {
-        let config: CustomTransformConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(CustomTransformBlock::new(config, Arc::clone(&transform))))
+        let config: CustomTransformConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(CustomTransformBlock::new(
+            config,
+            Arc::clone(&transform),
+        )))
     });
 }
 

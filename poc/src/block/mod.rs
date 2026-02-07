@@ -1,24 +1,24 @@
 use std::fmt;
 pub mod ai;
 pub mod cron;
+mod delay;
+pub mod email;
 mod executor_error;
 pub mod file;
-pub mod utils;
-pub mod email;
 mod human;
-mod delay;
+pub mod utils;
 
-use uuid::Uuid;
 use crossbeam::channel::Receiver;
+use uuid::Uuid;
 
 use executor_error::ExecutorError;
 
 use ai::{AIBlockBody, execute_ai};
 use cron::{CronBlockBody, execute_cron};
-use file::{FileBlockBody, execute_file};
-use email::{EmailBlockBody, execute_email};
-use human::{HumanBlockBody, execute_human};
 use delay::{DelayBlockBody, execute_delay};
+use email::{EmailBlockBody, execute_email};
+use file::{FileBlockBody, execute_file};
+use human::{HumanBlockBody, execute_human};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum BlockType {
@@ -56,12 +56,12 @@ pub enum BlockBody {
 #[derive(Debug, Clone)]
 pub enum BlockExecutionType {
     Response,
-    Trigger
+    Trigger,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerType {
     OneShot,
-    Recurring
+    Recurring,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +114,6 @@ impl BlockExecutorTrait for Block {
             Some(BlockBody::HUMAN(body)) => execute_human(input, body),
             Some(BlockBody::DELAY(body)) => execute_delay(input, body),
             _ => Err(ExecutorError::NotImplemented("test".to_string())),
-
         }
     }
 }
@@ -122,7 +121,7 @@ impl BlockExecutorTrait for Block {
 #[derive(Debug, Clone)]
 pub enum ExecutionResult {
     Trigger(Receiver<Option<String>>, TriggerType),
-    Response(Option<String>)
+    Response(Option<String>),
 }
 
 pub type ExecutionRunResult = Result<Option<ExecutionResult>, ExecutorError>;

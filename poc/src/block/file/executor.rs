@@ -1,10 +1,10 @@
-use crate::{block::{ExecutionResult, ExecutionRunResult, executor_error::ExecutorError}, logger};
 use super::{FileBlockBody, FileOperationType};
+use crate::{
+    block::{ExecutionResult, ExecutionRunResult, executor_error::ExecutorError},
+    logger,
+};
 
-pub fn execute_file(
-    input: Option<String>,
-    body: FileBlockBody,
-) -> ExecutionRunResult {
+pub fn execute_file(input: Option<String>, body: FileBlockBody) -> ExecutionRunResult {
     match std::fs::exists(&body.location) {
         Err(e) => {
             return Err(ExecutorError::FileError(body.location, e));
@@ -34,23 +34,18 @@ pub fn execute_file(
         FileOperationType::READ => {
             let path = body.location + "/" + &body.file_name;
             match std::fs::read_to_string(&path) {
-                Err(e) => {
-                    Err(ExecutorError::FileError(path, e))
-                }
+                Err(e) => Err(ExecutorError::FileError(path, e)),
                 Ok(content) => {
                     logger::info("File read successful");
                     Ok(Some(ExecutionResult::Response(Some(content))))
                 }
             }
-        },
-        FileOperationType::WATCH => {
-            Err(ExecutorError::NotImplemented("File Watch not implemented".to_owned()))
         }
+        FileOperationType::WATCH => Err(ExecutorError::NotImplemented(
+            "File Watch not implemented".to_owned(),
+        )),
     }
 }
-
-
-
 
 #[cfg(test)]
 mod test {
@@ -102,8 +97,8 @@ mod test {
             }
             Err(e) => {
                 panic!("error {e}");
-            },
-            _ => panic!("unexpected response")
+            }
+            _ => panic!("unexpected response"),
         }
     }
 }

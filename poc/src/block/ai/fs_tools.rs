@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -24,8 +24,8 @@ pub struct FsPolicy {
 
 impl FsPolicy {
     pub fn new(base_dir: impl Into<PathBuf>) -> Result<Self> {
-        let base_dir = dunce::canonicalize(base_dir.into())
-            .context("failed to canonicalize base_dir")?;
+        let base_dir =
+            dunce::canonicalize(base_dir.into()).context("failed to canonicalize base_dir")?;
 
         Ok(Self {
             base_dir,
@@ -245,7 +245,9 @@ impl FsTools {
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            *by_extension.entry(ext.clone().unwrap_or_default()).or_insert(0) += 1;
+            *by_extension
+                .entry(ext.clone().unwrap_or_default())
+                .or_insert(0) += 1;
 
             let modified_utc = md.modified().ok().map(DateTime::<Utc>::from);
             let hash8 = hash_prefix(path, 4096).ok();
@@ -311,7 +313,10 @@ impl FsTools {
         buf.truncate(n);
 
         if buf.contains(&0) {
-            return Err(anyhow!("binary file (NUL byte detected): {}", canon.display()));
+            return Err(anyhow!(
+                "binary file (NUL byte detected): {}",
+                canon.display()
+            ));
         }
         let s = std::str::from_utf8(&buf).context("not UTF-8")?;
         Ok(s.to_string())
@@ -340,7 +345,9 @@ impl FsTools {
         let mut warnings = Vec::new();
 
         let mut wb = WalkBuilder::new(&root);
-        wb.hidden(false).follow_links(false).max_depth(Some(self.policy.max_depth));
+        wb.hidden(false)
+            .follow_links(false)
+            .max_depth(Some(self.policy.max_depth));
 
         'walk: for entry in wb.build() {
             let entry = match entry {
@@ -386,7 +393,11 @@ impl FsTools {
                     Err(_) => continue,
                 };
 
-                let hay = if case_sensitive { line.clone() } else { line.to_lowercase() };
+                let hay = if case_sensitive {
+                    line.clone()
+                } else {
+                    line.to_lowercase()
+                };
                 if hay.contains(&needle) {
                     out.push(GrepMatch {
                         path: rel.to_string_lossy().to_string(),
@@ -475,9 +486,10 @@ impl FsTools {
             let grep_cargo = self.grep(root.display().to_string(), "name =", true, 2000)?;
             for m in grep_cargo.matches {
                 if (m.path.eq_ignore_ascii_case("Cargo.toml") || m.path.ends_with("/Cargo.toml"))
-                    && let Some(name) = parse_cargo_name_line(&m.snippet) {
-                        crates.insert(name);
-                    }
+                    && let Some(name) = parse_cargo_name_line(&m.snippet)
+                {
+                    crates.insert(name);
+                }
                 if m.path.ends_with("src/main.rs") {
                     binaries.insert("src/main.rs".to_string());
                 }
@@ -590,7 +602,10 @@ fn detect_signals(files: &BTreeSet<String>) -> Vec<String> {
     if has("Dockerfile") {
         signals.push("docker: Dockerfile present".to_string());
     }
-    if files.iter().any(|p| p.to_lowercase().contains("docker-compose")) {
+    if files
+        .iter()
+        .any(|p| p.to_lowercase().contains("docker-compose"))
+    {
         signals.push("docker_compose: compose file present".to_string());
     }
     if files.iter().any(|p| p.to_lowercase().starts_with("readme")) {
@@ -602,14 +617,23 @@ fn detect_signals(files: &BTreeSet<String>) -> Vec<String> {
 fn sample_smart(root: &Path, files: &BTreeSet<String>, max_bytes: usize) -> Vec<FileSample> {
     // Priority targets
     let priority = [
-        "README", "README.md", "README.MD",
-        "Cargo.toml", "Cargo.lock",
-        "package.json", "pnpm-lock.yaml", "yarn.lock",
-        "pyproject.toml", "requirements.txt",
+        "README",
+        "README.md",
+        "README.MD",
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "pyproject.toml",
+        "requirements.txt",
         "go.mod",
-        "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
         "Makefile",
-        "src/main.rs", "src/lib.rs",
+        "src/main.rs",
+        "src/lib.rs",
     ];
 
     let mut picked: Vec<String> = Vec::new();

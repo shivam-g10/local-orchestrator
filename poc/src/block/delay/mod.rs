@@ -19,7 +19,6 @@ impl DelayBlockBody {
     pub fn set_forward_message(&mut self, forward_message: bool) {
         self.forward_message = forward_message;
     }
-    
 }
 
 #[cfg(test)]
@@ -42,6 +41,5 @@ mod test {
         };
 
         assert!(!block.id.is_nil());
-
     }
 }

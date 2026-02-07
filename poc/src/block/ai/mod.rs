@@ -1,7 +1,7 @@
 mod executor;
-pub mod utils;
-mod open_ai;
 mod fs_tools;
+mod open_ai;
+pub mod utils;
 pub use executor::execute_ai;
 
 use crate::block::ai::fs_tools::FsTools;
@@ -47,8 +47,6 @@ impl AIBlockBody {
         self
     }
 }
-
-
 
 #[cfg(test)]
 mod test {

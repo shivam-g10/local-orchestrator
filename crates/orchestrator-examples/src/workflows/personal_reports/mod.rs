@@ -8,12 +8,12 @@ use std::path::Path;
 
 use std::sync::Arc;
 
-use orchestrator_core::{BlockRegistry, RunError, Workflow, WorkflowDefinition};
-use orchestrator_blocks::{registry_with_mailer, register_markdown_to_html, Block, PulldownMarkdownRenderer};
-
-use blocks::{
-    LettreMailer, ReadPathsBlock, ReportTransformBlock, NextDayNoteBlock, StubMailer,
+use orchestrator_blocks::{
+    Block, PulldownMarkdownRenderer, register_markdown_to_html, registry_with_mailer,
 };
+use orchestrator_core::{BlockRegistry, RunError, Workflow, WorkflowDefinition};
+
+use blocks::{LettreMailer, NextDayNoteBlock, ReadPathsBlock, ReportTransformBlock, StubMailer};
 
 /// Ensure dummy data exists under `base_path`: one daily note (today), reports/*.md with a year's metrics, email_template.hbs.
 pub fn ensure_dummy_data(base_path: &Path) -> Result<(), std::io::Error> {
@@ -52,7 +52,10 @@ pub fn ensure_dummy_data(base_path: &Path) -> Result<(), std::io::Error> {
     )?;
 
     let template = base_path.join("email_template.hbs");
-    std::fs::write(template, "<!DOCTYPE html><html><body>\n{{{body}}}\n</body></html>\n")?;
+    std::fs::write(
+        template,
+        "<!DOCTYPE html><html><body>\n{{{body}}}\n</body></html>\n",
+    )?;
     Ok(())
 }
 
@@ -80,8 +83,13 @@ fn build_email_child_definition(
     let mut w = Workflow::with_registry(registry);
     let entry_id = w.add(Block::custom_transform(None::<String>));
     let markdown_id = w.add(Block::markdown_to_html());
-    let file_read_id = w.add(Block::file_read(Some(template_path.to_string_lossy().as_ref())));
-    let combine_id = w.add(Block::combine(vec!["body".to_string(), "template".to_string()]));
+    let file_read_id = w.add(Block::file_read(Some(
+        template_path.to_string_lossy().as_ref(),
+    )));
+    let combine_id = w.add(Block::combine(vec![
+        "body".to_string(),
+        "template".to_string(),
+    ]));
     let handlebars_id = w.add(Block::template_handlebars(None::<String>, None));
     let send_email_id = w.add(Block::send_email(to_email, Some(subject)));
     w.link(entry_id, markdown_id);
@@ -103,13 +111,12 @@ pub fn run_personal_reports_workflow(
     next_day_note_path: &Path,
     email_out_path: &Path,
 ) -> Result<(), RunError> {
-    let mailer: Arc<dyn orchestrator_blocks::SendEmail> =
-        match LettreMailer::from_env() {
-            Ok(m) => Arc::new(m),
-            Err(_) => Arc::new(StubMailer {
-                output_path: email_out_path.to_path_buf(),
-            }),
-        };
+    let mailer: Arc<dyn orchestrator_blocks::SendEmail> = match LettreMailer::from_env() {
+        Ok(m) => Arc::new(m),
+        Err(_) => Arc::new(StubMailer {
+            output_path: email_out_path.to_path_buf(),
+        }),
+    };
     let markdown_renderer: Arc<dyn orchestrator_blocks::MarkdownToHtml> =
         Arc::new(PulldownMarkdownRenderer);
     let child_def = build_email_child_definition(
@@ -125,8 +132,12 @@ pub fn run_personal_reports_workflow(
 
     // Cron 0.15 uses 7 fields: sec min hour day month day_of_week year. E.g. every 5 min:
     let cron_id = w.add(Block::cron("0 */1 * * * * *"));
-    let list_notes_id = w.add(Block::list_directory_force_config(Some(daily_notes_path.to_string_lossy().as_ref())));
-    let list_reports_id = w.add(Block::list_directory_force_config(Some(reports_path.to_string_lossy().as_ref())));
+    let list_notes_id = w.add(Block::list_directory_force_config(Some(
+        daily_notes_path.to_string_lossy().as_ref(),
+    )));
+    let list_reports_id = w.add(Block::list_directory_force_config(Some(
+        reports_path.to_string_lossy().as_ref(),
+    )));
 
     w.link(cron_id, list_notes_id);
     w.link(cron_id, list_reports_id);
@@ -139,7 +150,10 @@ pub fn run_personal_reports_workflow(
     w.link(select_id, read_note_id);
     w.link(list_reports_id, read_paths_id);
 
-    let combine1_id = w.add(Block::combine(vec!["daily_note".to_string(), "reports".to_string()]));
+    let combine1_id = w.add(Block::combine(vec![
+        "daily_note".to_string(),
+        "reports".to_string(),
+    ]));
     w.link(read_note_id, combine1_id);
     w.link(read_paths_id, combine1_id);
 
@@ -162,12 +176,22 @@ pub fn run_personal_reports_workflow(
     let yearly_path = reports_path.join("yearly.md");
     let consolidated_path = reports_path.join("consolidated.md");
 
-    let write_daily_id = w.add(Block::file_write(Some(daily_path.to_string_lossy().as_ref())));
-    let write_weekly_id = w.add(Block::file_write(Some(weekly_path.to_string_lossy().as_ref())));
-    let write_monthly_id = w.add(Block::file_write(Some(monthly_path.to_string_lossy().as_ref())));
-    let write_yearly_id = w.add(Block::file_write(Some(yearly_path.to_string_lossy().as_ref())));
+    let write_daily_id = w.add(Block::file_write(Some(
+        daily_path.to_string_lossy().as_ref(),
+    )));
+    let write_weekly_id = w.add(Block::file_write(Some(
+        weekly_path.to_string_lossy().as_ref(),
+    )));
+    let write_monthly_id = w.add(Block::file_write(Some(
+        monthly_path.to_string_lossy().as_ref(),
+    )));
+    let write_yearly_id = w.add(Block::file_write(Some(
+        yearly_path.to_string_lossy().as_ref(),
+    )));
     let child_id = w.add(Block::child_workflow(child_def));
-    let write_consolidated_id = w.add(Block::file_write(Some(consolidated_path.to_string_lossy().as_ref())));
+    let write_consolidated_id = w.add(Block::file_write(Some(
+        consolidated_path.to_string_lossy().as_ref(),
+    )));
 
     w.link(split_id, write_daily_id);
     w.link(split_id, write_weekly_id);
@@ -192,7 +216,9 @@ pub fn run_personal_reports_workflow(
     let next_day_id = w.add_custom("next_day_note", serde_json::json!({}))?;
     w.link(combine2_id, next_day_id);
 
-    let write_next_id = w.add(Block::file_write(Some(next_day_note_path.to_string_lossy().as_ref())));
+    let write_next_id = w.add(Block::file_write(Some(
+        next_day_note_path.to_string_lossy().as_ref(),
+    )));
     w.link(next_day_id, write_next_id);
 
     w.run()?;

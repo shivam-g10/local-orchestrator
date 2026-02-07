@@ -71,24 +71,25 @@ impl BlockExecutor for ListDirectoryBlock {
             return Err(BlockError::Other(message.clone()));
         }
         let path = if self.config.force_config_path {
-            self.config
-                .path_buf()
-                .ok_or_else(|| BlockError::Other("path required when force_config_path is true".into()))?
+            self.config.path_buf().ok_or_else(|| {
+                BlockError::Other("path required when force_config_path is true".into())
+            })?
         } else {
             match &input {
                 BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
                 BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
-                _ => self
-                    .config
-                    .path_buf()
-                    .ok_or_else(|| BlockError::Other("path required from input or config".into()))?,
+                _ => self.config.path_buf().ok_or_else(|| {
+                    BlockError::Other("path required from input or config".into())
+                })?,
             }
         };
         let entries = self
             .lister
             .list(&path)
             .map_err(|e| BlockError::Other(e.0))?;
-        Ok(BlockExecutionResult::Once(BlockOutput::List { items: entries }))
+        Ok(BlockExecutionResult::Once(BlockOutput::List {
+            items: entries,
+        }))
     }
 }
 
@@ -98,7 +99,10 @@ pub struct StdDirectoryLister;
 impl DirectoryLister for StdDirectoryLister {
     fn list(&self, path: &Path) -> Result<Vec<String>, ListDirectoryError> {
         if !path.is_dir() {
-            return Err(ListDirectoryError(format!("not a directory: {}", path.display())));
+            return Err(ListDirectoryError(format!(
+                "not a directory: {}",
+                path.display()
+            )));
         }
         let entries: Vec<String> = std::fs::read_dir(path)
             .map_err(|e| ListDirectoryError(format!("{}: {}", path.display(), e)))?
@@ -116,9 +120,12 @@ pub fn register_list_directory(
 ) {
     let lister = Arc::clone(&lister);
     registry.register_custom("list_directory", move |payload| {
-        let config: ListDirectoryConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(ListDirectoryBlock::new(config, Arc::clone(&lister))))
+        let config: ListDirectoryConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(ListDirectoryBlock::new(
+            config,
+            Arc::clone(&lister),
+        )))
     });
 }
 

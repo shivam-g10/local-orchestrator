@@ -1,14 +1,16 @@
 use std::time::Duration;
 
-use crate::{block::{ExecutionResult, ExecutionRunResult, TriggerType}, logger};
+use crate::{
+    block::{ExecutionResult, ExecutionRunResult, TriggerType},
+    logger,
+};
 
 use super::DelayBlockBody;
 use crossbeam::channel::bounded;
 
-
 pub fn execute_delay(input: Option<String>, body: DelayBlockBody) -> ExecutionRunResult {
     let (send, rec) = bounded::<Option<String>>(0);
-    
+
     std::thread::spawn(move || {
         loop {
             let sleep_time = Duration::from_millis(body.delay_ms);
@@ -22,11 +24,9 @@ pub fn execute_delay(input: Option<String>, body: DelayBlockBody) -> ExecutionRu
             let result = send.send(message);
             logger::debug(&format!("result from send: {:#?}", result));
         }
-        
     });
     Ok(Some(ExecutionResult::Trigger(rec, TriggerType::OneShot)))
 }
-
 
 #[cfg(test)]
 mod test {
@@ -54,7 +54,7 @@ mod test {
                 panic!("Got response instead of trigger")
             }
         };
-        
+
         let receive = rec.recv_timeout(Duration::from_millis(2000));
         assert!(receive.is_ok(), "Expected Ok, got {:#?}", receive);
         let msg = receive.unwrap();

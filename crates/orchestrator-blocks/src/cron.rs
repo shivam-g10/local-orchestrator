@@ -125,8 +125,8 @@ pub fn register_cron(
 ) {
     let runner = Arc::clone(&runner);
     registry.register_custom("cron", move |payload| {
-        let mut config: CronConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
+        let mut config: CronConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         config.cron = config.cron.trim().to_string();
         Ok(Box::new(CronBlock::new(config, Arc::clone(&runner))))
     });

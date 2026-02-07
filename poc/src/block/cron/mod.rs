@@ -15,16 +15,11 @@ pub struct CronBlockBody {
 impl CronBlockBody {
     pub fn new(cron: String) -> Result<Self, cron::error::Error> {
         match Schedule::from_str(cron.as_str()) {
-            Ok(_) => {
-                Ok(Self { cron })
-            }
-            Err(err) => {
-                Err(err)
-            }
+            Ok(_) => Ok(Self { cron }),
+            Err(err) => Err(err),
         }
     }
 }
-
 
 #[cfg(test)]
 mod test {

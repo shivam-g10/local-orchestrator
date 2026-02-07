@@ -1,6 +1,7 @@
-use crate::block::{ExecutionRunResult, human::{FormFieldConfig, FormSubmit, HumanBlockBody}};
-
-
+use crate::block::{
+    ExecutionRunResult,
+    human::{FormFieldConfig, FormSubmit, HumanBlockBody},
+};
 
 pub fn execute_human(_: Option<String>, _: HumanBlockBody) -> ExecutionRunResult {
     Ok(None)

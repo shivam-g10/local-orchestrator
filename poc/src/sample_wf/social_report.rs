@@ -6,7 +6,6 @@ use crate::{
     workflow::Workflow,
 };
 
-
 pub fn rust_social_workflow() -> Result<(), Box<dyn Error>> {
     let api_key = config::get_env::<String>("OPENAI_API_KEY");
 
@@ -33,11 +32,8 @@ pub fn rust_social_workflow() -> Result<(), Box<dyn Error>> {
     );
     flow.register_block(ai_email.clone());
 
-    let email_block_result = email_utils::create_email_block(
-    "test@test.com",
-        "Test email",
-        "Social Pulse",
-    );
+    let email_block_result =
+        email_utils::create_email_block("test@test.com", "Test email", "Social Pulse");
     let email_block = match email_block_result {
         Err(e) => return Err(Box::new(e)),
         Ok(block) => block,

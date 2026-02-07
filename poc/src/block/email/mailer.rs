@@ -1,9 +1,9 @@
 use std::str::FromStr;
 
 use lettre::{
-    message::{header::ContentType, Mailbox},
+    Address, Message, SmtpTransport, Transport,
+    message::{Mailbox, header::ContentType},
     transport::smtp::PoolConfig,
-    Address, SmtpTransport, Transport, Message,
 };
 
 use crate::logger;
@@ -67,7 +67,6 @@ impl Mailer {
         }
     }
 
-
     pub fn send_email(
         &self,
         subject: &str,
@@ -103,13 +102,18 @@ impl Mailer {
 #[cfg(test)]
 mod test {
     use super::*;
-    
+
     #[test]
     fn test_send_email() {
         config::init();
         let mailer = Mailer::new();
         assert!(mailer.check_connection(), "Error connecting to smtp");
-        let result = mailer.send_email("test", "test name", "test@test.com", "This is a test email".to_string());
+        let result = mailer.send_email(
+            "test",
+            "test name",
+            "test@test.com",
+            "This is a test email".to_string(),
+        );
         assert!(result.is_ok(), "Error in sending email {:#?}", result.err())
     }
 }

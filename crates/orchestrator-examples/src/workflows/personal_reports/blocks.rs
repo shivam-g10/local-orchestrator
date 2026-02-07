@@ -5,15 +5,15 @@ use std::path::Path;
 use std::str::FromStr;
 
 use lettre::{
-    message::{header::ContentType, Mailbox},
-    transport::smtp::PoolConfig,
     Address, Message, SmtpTransport, Transport,
+    message::{Mailbox, header::ContentType},
+    transport::smtp::PoolConfig,
 };
 
+use orchestrator_blocks::SendEmail;
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
-use orchestrator_blocks::SendEmail;
 
 /// ReadPathsBlock: input = List of paths, reads all files, output = JSON { "contents": [ { "path", "content" } ] }.
 pub struct ReadPathsBlock;
@@ -24,20 +24,26 @@ impl BlockExecutor for ReadPathsBlock {
             BlockInput::List { items } => items.clone(),
             BlockInput::Json(v) => {
                 let arr = v.as_array().ok_or_else(|| {
-                    BlockError::Other("read_paths expects List or JSON array of path strings".into())
+                    BlockError::Other(
+                        "read_paths expects List or JSON array of path strings".into(),
+                    )
                 })?;
                 let items: Result<Vec<String>, _> = arr
                     .iter()
                     .map(|v| {
-                        v.as_str()
-                            .map(String::from)
-                            .ok_or_else(|| BlockError::Other("path elements must be strings".into()))
+                        v.as_str().map(String::from).ok_or_else(|| {
+                            BlockError::Other("path elements must be strings".into())
+                        })
                     })
                     .collect();
                 items?
             }
             BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
-            _ => return Err(BlockError::Other("read_paths expects List or JSON array of paths".into())),
+            _ => {
+                return Err(BlockError::Other(
+                    "read_paths expects List or JSON array of paths".into(),
+                ));
+            }
         };
         let mut contents = Vec::new();
         for p in &paths {
@@ -101,16 +107,17 @@ fn parse_task_counts_from_note(text: &str) -> TaskCounts {
     } else {
         0
     };
-    TaskCounts { completed, open, repeated }
+    TaskCounts {
+        completed,
+        open,
+        repeated,
+    }
 }
 
 /// Parse "Completed: N | Open: M | Repeated: R" from report text (supports **bold** or plain).
 /// Uses the last line containing "Completed:" so multi-section content (e.g. headers) does not confuse parsing.
 fn parse_metrics_from_report(text: &str) -> TaskCounts {
-    let metrics_line = text
-        .lines()
-        .rev()
-        .find(|l| l.contains("Completed:"));
+    let metrics_line = text.lines().rev().find(|l| l.contains("Completed:"));
     let line = match metrics_line {
         Some(l) => l,
         None => return TaskCounts::default(),
@@ -128,11 +135,18 @@ fn parse_metrics_from_report(text: &str) -> TaskCounts {
             repeated = s.trim().parse().unwrap_or(0);
         }
     }
-    TaskCounts { completed, open, repeated }
+    TaskCounts {
+        completed,
+        open,
+        repeated,
+    }
 }
 
 fn metrics_line(completed: usize, open: usize, repeated: usize) -> String {
-    format!("Completed: {} | Open: {} | Repeated: {}", completed, open, repeated)
+    format!(
+        "Completed: {} | Open: {} | Repeated: {}",
+        completed, open, repeated
+    )
 }
 
 /// Find content by path ending (e.g. "daily.md").
@@ -160,7 +174,11 @@ impl BlockExecutor for ReportTransformBlock {
                 (daily_note, reports)
             }
             BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
-            _ => return Err(BlockError::Other("report_transform expects Json { daily_note, reports }".into())),
+            _ => {
+                return Err(BlockError::Other(
+                    "report_transform expects Json { daily_note, reports }".into(),
+                ));
+            }
         };
 
         let today = Local::now().date_naive();
@@ -172,8 +190,15 @@ impl BlockExecutor for ReportTransformBlock {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|x| {
-                        let path = x.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                        let content = x.get("content").and_then(|c| c.as_str()).map(String::from)?;
+                        let path = x
+                            .get("path")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = x
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(String::from)?;
                         Some((path, content))
                     })
                     .collect()
@@ -186,9 +211,18 @@ impl BlockExecutor for ReportTransformBlock {
         let prev_yearly_content = find_content(&contents, "yearly.md");
         let prev_consolidated_content = find_content(&contents, "consolidated.md");
 
-        let prev_weekly = prev_weekly_content.as_deref().map(parse_metrics_from_report).unwrap_or_default();
-        let prev_monthly = prev_monthly_content.as_deref().map(parse_metrics_from_report).unwrap_or_default();
-        let prev_yearly = prev_yearly_content.as_deref().map(parse_metrics_from_report).unwrap_or_default();
+        let prev_weekly = prev_weekly_content
+            .as_deref()
+            .map(parse_metrics_from_report)
+            .unwrap_or_default();
+        let prev_monthly = prev_monthly_content
+            .as_deref()
+            .map(parse_metrics_from_report)
+            .unwrap_or_default();
+        let prev_yearly = prev_yearly_content
+            .as_deref()
+            .map(parse_metrics_from_report)
+            .unwrap_or_default();
         let prev_total = prev_consolidated_content
             .as_deref()
             .and_then(|c| c.split("## Total till date").nth(1))
@@ -229,26 +263,46 @@ impl BlockExecutor for ReportTransformBlock {
         let daily = format!(
             "## Daily - {}\n{}",
             date_str,
-            metrics_line(today_counts.completed, today_counts.open, today_counts.repeated)
+            metrics_line(
+                today_counts.completed,
+                today_counts.open,
+                today_counts.repeated
+            )
         );
         let weekly = format!(
             "## Weekly - {}\n{}",
             week_range,
-            metrics_line(weekly_counts.completed, weekly_counts.open, weekly_counts.repeated)
+            metrics_line(
+                weekly_counts.completed,
+                weekly_counts.open,
+                weekly_counts.repeated
+            )
         );
         let monthly = format!(
             "## Monthly - {}\n{}",
             month_str,
-            metrics_line(monthly_counts.completed, monthly_counts.open, monthly_counts.repeated)
+            metrics_line(
+                monthly_counts.completed,
+                monthly_counts.open,
+                monthly_counts.repeated
+            )
         );
         let yearly = format!(
             "## Yearly - {}\n{}",
             year_str,
-            metrics_line(yearly_counts.completed, yearly_counts.open, yearly_counts.repeated)
+            metrics_line(
+                yearly_counts.completed,
+                yearly_counts.open,
+                yearly_counts.repeated
+            )
         );
         let total_section = format!(
             "## Total till date\n{}",
-            metrics_line(total_counts.completed, total_counts.open, total_counts.repeated)
+            metrics_line(
+                total_counts.completed,
+                total_counts.open,
+                total_counts.repeated
+            )
         );
 
         let consolidated = format!(
@@ -284,12 +338,18 @@ fn output_to_string(o: &BlockOutput) -> String {
 impl BlockExecutor for NextDayNoteBlock {
     fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
         let summary = match &input {
-            BlockInput::Multi { outputs } => {
-                outputs.iter().map(output_to_string).collect::<Vec<_>>().join("\n---\n")
-            }
+            BlockInput::Multi { outputs } => outputs
+                .iter()
+                .map(output_to_string)
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
             BlockInput::Json(v) => v.to_string(),
             BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
-            _ => return Err(BlockError::Other("next_day_note expects Multi or Json".into())),
+            _ => {
+                return Err(BlockError::Other(
+                    "next_day_note expects Multi or Json".into(),
+                ));
+            }
         };
         let next_day = "Next day note placeholder\n---\n(empty tasks)\n";
         let body = format!("{}\n\n{}", next_day, summary);
@@ -322,7 +382,10 @@ impl SendEmail for StubMailer {
 
 /// Load .env from examples crate dir or current dir (for personal_reports).
 fn load_env() {
-    if let Ok(canon) = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env").canonicalize() {
+    if let Ok(canon) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".env")
+        .canonicalize()
+    {
         let _ = dotenvy::from_path(canon);
     }
     let _ = dotenvy::dotenv();

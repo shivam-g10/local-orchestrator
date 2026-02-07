@@ -5,12 +5,11 @@ pub mod utils;
 
 pub use executor::execute_human;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HumanBlockType {
-    Approval, // approve/reject 
-    Play, // Click and play
-    Form, // Sumbit form data
+    Approval, // approve/reject
+    Play,     // Click and play
+    Form,     // Sumbit form data
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +70,7 @@ impl FormFieldConfig {
         match self.options {
             Some(ref mut option_list) => {
                 option_list.push(option);
-            },
+            }
             None => {
                 self.options = Some(vec![option]);
             }
@@ -111,7 +110,7 @@ impl HumanBlockBody {
     }
 
     pub fn get_form_config(&self) -> &Option<Vec<FormFieldConfig>> {
-        &self.form_config    
+        &self.form_config
     }
 
     pub fn set_form_config(&mut self, form_config: Vec<FormFieldConfig>) {
@@ -129,9 +128,7 @@ mod test {
     #[test]
     fn create_human_block() {
         let mut block = Block::new(BlockType::HUMAN, BlockExecutionType::Trigger);
-        let body = HumanBlockBody::new(
-            HumanBlockType::Play,
-        );
+        let body = HumanBlockBody::new(HumanBlockType::Play);
         block.set_block_body(BlockBody::HUMAN(body));
         assert_eq!(block.block_type, BlockType::HUMAN);
         assert!(block.block_body.is_some());

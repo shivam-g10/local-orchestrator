@@ -640,9 +640,9 @@ mod test {
         }"#;
         let parsed: ResponsesResponse = match serde_json::from_str(json) {
             Ok(j) => j,
-            Err(e) => panic!("{}" ,e),
+            Err(e) => panic!("{}", e),
         };
 
-        println!("{:#?}",parsed);
+        println!("{:#?}", parsed);
     }
 }

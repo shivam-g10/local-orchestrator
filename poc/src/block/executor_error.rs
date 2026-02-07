@@ -21,4 +21,3 @@ pub enum ExecutorError {
     #[error("Error sending email: {0}")]
     EmailSendError(Box<dyn std::error::Error>),
 }
-

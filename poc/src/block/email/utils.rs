@@ -1,18 +1,10 @@
 use lettre::address::AddressError;
 
-use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 use super::EmailBlockBody;
+use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 
-pub fn create_email_block(
-    email: &str,
-    name: &str,
-    subject: &str,
-) -> Result<Block, AddressError> {
-    let body_result = EmailBlockBody::new(
-        email,
-        name,
-        subject,
-    );
+pub fn create_email_block(email: &str, name: &str, subject: &str) -> Result<Block, AddressError> {
+    let body_result = EmailBlockBody::new(email, name, subject);
     let body = match body_result {
         Err(err) => {
             return Err(err);

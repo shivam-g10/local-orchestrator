@@ -1,4 +1,7 @@
-use crate::{block::{ExecutionRunResult, executor_error::ExecutorError}, logger};
+use crate::{
+    block::{ExecutionRunResult, executor_error::ExecutorError},
+    logger,
+};
 
 use super::EmailBlockBody;
 
@@ -10,7 +13,7 @@ pub fn execute_email(input: Option<String>, body: EmailBlockBody) -> ExecutionRu
 
     let mailer = super::mailer::Mailer::new();
     if !mailer.check_connection() {
-        return Err(ExecutorError::EmailConnectionError)
+        return Err(ExecutorError::EmailConnectionError);
     }
 
     match mailer.send_email(&body.subject, &body.name, &body.email, email_content) {

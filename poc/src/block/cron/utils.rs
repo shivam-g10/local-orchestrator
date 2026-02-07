@@ -1,5 +1,5 @@
-use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 use super::CronBlockBody;
+use crate::block::{Block, BlockBody, BlockExecutionType, BlockType};
 
 pub fn create_cron_block(cron: &str) -> Result<Block, cron::error::Error> {
     let body_result = CronBlockBody::new(cron.to_string());

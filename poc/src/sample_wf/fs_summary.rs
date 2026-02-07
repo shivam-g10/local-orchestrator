@@ -26,7 +26,8 @@ pub fn rust_summary_workflow() -> Result<(), Box<dyn Error>> {
         ),
     );
     let fs_tools = ai_utils::create_fs_tools(".").expect("Error in setting fs tools directory");
-    ai_fs_search_block = ai_utils::add_fs_tools_to_ai_block(ai_fs_search_block, fs_tools).expect("Error in adding fs tools to block");
+    ai_fs_search_block = ai_utils::add_fs_tools_to_ai_block(ai_fs_search_block, fs_tools)
+        .expect("Error in adding fs tools to block");
     flow.register_block(ai_fs_search_block.clone());
 
     let ai_report = ai_utils::create_ai_block(

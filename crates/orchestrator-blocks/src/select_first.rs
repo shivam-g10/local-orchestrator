@@ -54,9 +54,9 @@ fn input_to_items(input: &BlockInput) -> Result<Vec<String>, BlockError> {
             let items: Result<Vec<String>, _> = arr
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(String::from)
-                        .ok_or_else(|| BlockError::Other("select_first array elements must be strings".into()))
+                    v.as_str().map(String::from).ok_or_else(|| {
+                        BlockError::Other("select_first array elements must be strings".into())
+                    })
                 })
                 .collect();
             items
@@ -127,9 +127,12 @@ pub fn register_select_first(
 ) {
     let selector = Arc::clone(&selector);
     registry.register_custom("select_first", move |payload| {
-        let config: SelectFirstConfig = serde_json::from_value(payload)
-            .map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SelectFirstBlock::new(config, Arc::clone(&selector))))
+        let config: SelectFirstConfig =
+            serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
+        Ok(Box::new(SelectFirstBlock::new(
+            config,
+            Arc::clone(&selector),
+        )))
     });
 }
 

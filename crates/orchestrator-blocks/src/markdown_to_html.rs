@@ -72,7 +72,9 @@ impl BlockExecutor for MarkdownToHtmlBlock {
             .renderer
             .render(&md)
             .map_err(|e| BlockError::Other(e.0))?;
-        Ok(BlockExecutionResult::Once(BlockOutput::Text { value: html }))
+        Ok(BlockExecutionResult::Once(BlockOutput::Text {
+            value: html,
+        }))
     }
 }
 
@@ -81,7 +83,7 @@ pub struct PulldownMarkdownRenderer;
 
 impl MarkdownToHtml for PulldownMarkdownRenderer {
     fn render(&self, markdown: &str) -> Result<String, MarkdownError> {
-        use pulldown_cmark::{html, Parser};
+        use pulldown_cmark::{Parser, html};
         let mut out = String::new();
         html::push_html(&mut out, Parser::new(markdown));
         Ok(out)
@@ -95,9 +97,11 @@ pub fn register_markdown_to_html(
 ) {
     let renderer = Arc::clone(&renderer);
     registry.register_custom("markdown_to_html", move |payload| {
-        let config: MarkdownToHtmlConfig = serde_json::from_value(payload)
-            .unwrap_or_default();
-        Ok(Box::new(MarkdownToHtmlBlock::new(config, Arc::clone(&renderer))))
+        let config: MarkdownToHtmlConfig = serde_json::from_value(payload).unwrap_or_default();
+        Ok(Box::new(MarkdownToHtmlBlock::new(
+            config,
+            Arc::clone(&renderer),
+        )))
     });
 }
 
@@ -114,10 +118,7 @@ mod tests {
 
     #[test]
     fn markdown_to_html_renders_content() {
-        let block = MarkdownToHtmlBlock::new(
-            MarkdownToHtmlConfig,
-            Arc::new(TestRenderer),
-        );
+        let block = MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(TestRenderer));
         let input = BlockInput::String("<script>".into());
         let result = block.execute(input).unwrap();
         match result {
@@ -130,10 +131,7 @@ mod tests {
 
     #[test]
     fn markdown_to_html_empty_input_returns_empty() {
-        let block = MarkdownToHtmlBlock::new(
-            MarkdownToHtmlConfig,
-            Arc::new(TestRenderer),
-        );
+        let block = MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(TestRenderer));
         let result = block.execute(BlockInput::empty()).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, ""),
@@ -143,10 +141,7 @@ mod tests {
 
     #[test]
     fn markdown_to_html_error_input_returns_error() {
-        let block = MarkdownToHtmlBlock::new(
-            MarkdownToHtmlConfig,
-            Arc::new(TestRenderer),
-        );
+        let block = MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(TestRenderer));
         let input = BlockInput::Error {
             message: "upstream error".into(),
         };
@@ -157,10 +152,8 @@ mod tests {
 
     #[test]
     fn pulldown_renderer_produces_html() {
-        let block = MarkdownToHtmlBlock::new(
-            MarkdownToHtmlConfig,
-            Arc::new(PulldownMarkdownRenderer),
-        );
+        let block =
+            MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(PulldownMarkdownRenderer));
         let input = BlockInput::String("# Hi\n**bold**".into());
         let result = block.execute(input).unwrap();
         match result {
