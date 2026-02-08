@@ -3,7 +3,7 @@
 mod workflows;
 
 use clap::{Parser, Subcommand};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "orchestrator-examples")]
@@ -15,82 +15,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    //     /// Personal finance: bank statement CSV -> Excel (spending by category and month).
-    //     ExpenseReport {
-    //         /// Path to bank statement CSV (default: bundled sample).
-    //         #[arg(short, long)]
-    //         statement: Option<String>,
-    //         /// Output Excel path (default: ./expense_report.xlsx).
-    //         #[arg(short, long, default_value = "./expense_report.xlsx")]
-    //         output: String,
-    //     },
-    //     /// Stock report: CSV -> Polars pivot -> Excel.
-    //     StockReport {
-    //         /// Path to stock CSV (default: bundled sample).
-    //         #[arg(short, long)]
-    //         csv: Option<String>,
-    //         /// Output Excel path (default: ./stock_report.xlsx).
-    //         #[arg(short, long, default_value = "./stock_report.xlsx")]
-    //         output: String,
-    //     },
-    //     /// Cyclic workflow demo: entry -> A -> B -> A (cycle) -> sink. Demonstrates cycle handling.
-    //     CyclicDemo,
-    //     /// Read a file and pass through echo (multi-block chain).
-    //     PrintReadme {
-    //         /// Path to file to read (default: ../../README.md).
-    //         #[arg(default_value = "../../README.md")]
-    //         path: String,
-    //     },
-    //     /// Minimal workflow: single file_read block.
-    //     SingleFileRead {
-    //         /// Path to file to read.
-    //         path: String,
-    //     },
-    //     /// Copy files in parallel: for each (src, dst) pair, file_read -> file_write.
-    //     CopyFiles {
-    //         /// Pairs as "src1:dst1" "src2:dst2" (e.g. "a.txt:b.txt").
-    //         pairs: Vec<String>,
-    //     },
-    //     /// Invoice line processor: read file -> Split -> process first line. Optional cron (daily).
-    //     InvoiceLineProcessor {
-    //         /// Path to invoice lines file (default: bundled sample).
-    //         #[arg(short, long)]
-    //         input: Option<String>,
-    //     },
-    //     /// Price drop checker: Trigger -> Delay -> fetch price (HTTP or stub) -> Merge -> notify file.
-    //     PriceDropChecker {
-    //         /// Output path for notify file (default: ./price_drop_notify.txt).
-    //         #[arg(short, long, default_value = "./price_drop_notify.txt")]
-    //         output: String,
-    //         /// Price API URL (when set, uses HTTP block; otherwise stub).
-    //         #[arg(short, long)]
-    //         url: Option<String>,
-    //         /// Stub price for demo when no URL (default: 85.0).
-    //         #[arg(short, long, default_value = "85.0")]
-    //         price_stub: f64,
-    //     },
-    //     /// News aggregator: Trigger -> parallel HTTP -> Merge -> report.
-    //     NewsAggregator {
-    //         /// Comma-separated URLs to fetch (default: example.com, example.org).
-    //         #[arg(short, long)]
-    //         urls: Option<String>,
-    //     },
-    //     /// Retry until success: check -> Conditional (200?) -> sink. Cycle needs runtime branch selection.
-    //     RetryUntilSuccess {
-    //         /// Stub status for demo: "200" or "retry" (default: 200).
-    //         #[arg(short, long, default_value = "200")]
-    //         stub_status: String,
-    //     },
-    //     /// Child workflow demo: Trigger -> child_workflow(echo) -> echo. Shows composition.
-    //     ChildWorkflowDemo,
-    //     /// Data-flow demo: Merge(Trigger, HTTP) -> Split -> echo. Demonstrates distant data flow.
-    //     ContextPayloadDemo {
-    //         /// URL to fetch (default: example.com).
-    //         #[arg(short, long)]
-    //         url: Option<String>,
-    //     },
-    // }
-    /// Personal reports: daily notes + reports dir → combine → transform → split → file writes + email child.
+    /// Personal reports: daily notes + reports dir -> combine -> transform -> split -> file writes + email child.
     PersonalReports {
         /// Base directory for data (daily_notes/, reports/, email_template.hbs). If set, dummy data is generated here.
         #[arg(long)]
@@ -153,118 +78,145 @@ enum Commands {
         #[arg(long, default_value = "20")]
         max_items: usize,
     },
+    /// Trial activation nudge: trigger -> fetch inactive trials -> render nudge -> send email with on_error child logging.
+    TrialActivationNudge {
+        /// Base directory for workflow data and outputs.
+        #[arg(long)]
+        data_dir: Option<String>,
+        /// Endpoint URL for trial data.
+        #[arg(long, default_value = "https://internal/trials/not-activated")]
+        endpoint: String,
+        /// Recipient email for the nudge.
+        #[arg(long, default_value = "growth@company.com")]
+        to: String,
+        /// Subject line for the nudge.
+        #[arg(long, default_value = "Trial Activation Nudge")]
+        subject: String,
+        /// Cron expression (used only with --use-cron).
+        #[arg(long, default_value = "0 */15 * * * * *")]
+        cron: String,
+        /// Run as a recurring cron workflow instead of a single one-shot run.
+        #[arg(long, default_value_t = false)]
+        use_cron: bool,
+        /// Override trials payload file path used by the built-in mock requester.
+        #[arg(long)]
+        trials_payload_file: Option<String>,
+        /// Override nudge template path.
+        #[arg(long)]
+        nudge_template: Option<String>,
+        /// Override error template path.
+        #[arg(long)]
+        error_template: Option<String>,
+        /// Override email preview output path.
+        #[arg(long)]
+        email_out: Option<String>,
+        /// Override error log output path.
+        #[arg(long)]
+        error_log: Option<String>,
+    },
 }
 
-fn default_personal_reports_data_dir() -> std::path::PathBuf {
+fn default_personal_reports_data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("data")
         .join("personal_reports")
 }
 
-fn default_ai_news_digest_data_dir() -> std::path::PathBuf {
+fn default_ai_news_digest_data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("data")
         .join("ai_news_digest")
+}
+
+fn default_trial_activation_nudge_data_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("data")
+        .join("trial_activation_nudge")
+}
+
+fn configure_observability_defaults() {
+    if std::env::var("ORCHESTRATOR_LOG_LEVEL").is_err() {
+        // SAFETY: This CLI sets env vars before runtime startup in a single-threaded setup path.
+        unsafe {
+            std::env::set_var("ORCHESTRATOR_LOG_LEVEL", "info");
+        }
+    }
+    if std::env::var("ORCHESTRATOR_OBSERVABILITY_ENABLED").is_err()
+        && std::env::var("ORCHESTRATOR_OBSERVABILITY").is_err()
+    {
+        // SAFETY: This CLI sets env vars before runtime startup in a single-threaded setup path.
+        unsafe {
+            std::env::set_var("ORCHESTRATOR_OBSERVABILITY_ENABLED", "1");
+        }
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "enabled" => Some(true),
+        "0" | "false" | "no" | "off" | "disabled" => Some(false),
+        _ => None,
+    }
+}
+
+fn observability_enabled_from_env() -> bool {
+    for key in [
+        "ORCHESTRATOR_OBSERVABILITY_ENABLED",
+        "ORCHESTRATOR_OBSERVABILITY",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            return parse_bool_env(&value).unwrap_or(true);
+        }
+    }
+    true
+}
+
+fn observability_log_path_from_env() -> Option<PathBuf> {
+    std::env::var("ORCHESTRATOR_JSON_LOG_PATH")
+        .ok()
+        .map(PathBuf::from)
+}
+
+fn observability_level_from_env() -> String {
+    std::env::var("ORCHESTRATOR_LOG_LEVEL").unwrap_or_else(|_| "info".to_string())
+}
+
+fn print_observability_status(suggested_log_path: &Path) {
+    let enabled = observability_enabled_from_env();
+    let level = observability_level_from_env();
+    let log_path = observability_log_path_from_env();
+    match (enabled, log_path) {
+        (true, Some(path)) => {
+            println!(
+                "Observability: enabled (level={}, file={})",
+                level,
+                path.display()
+            );
+        }
+        (true, None) => {
+            println!(
+                "Observability: enabled (level={}, console text on stdout). Set ORCHESTRATOR_JSON_LOG_PATH={} to write JSONL to file.",
+                level,
+                suggested_log_path.display()
+            );
+        }
+        (false, Some(path)) => {
+            println!(
+                "Observability: disabled via env (level={}, file={})",
+                level,
+                path.display()
+            );
+        }
+        (false, None) => {
+            println!("Observability: disabled via env (level={}, stdout)", level);
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        //         None => {
-        //             println!("=== Personal finance: where is the money going? ===\n");
-        //             let statement_path = workflows::expense_report::default_statement_path();
-        //             let out_path = Path::new("./expense_report.xlsx");
-        //             let written = workflows::expense_report::run_expense_report_workflow(&statement_path, out_path)?;
-        //             println!(
-        //                 "Expense report written to {}.\n  Open it to see spending by category and monthly totals.",
-        //                 written.display()
-        //             );
-        //         }
-        //         Some(Commands::ExpenseReport { statement, output }) => {
-        //             println!("=== Personal finance: where is the money going? ===\n");
-        //             let statement_path = statement
-        //                 .map(std::path::PathBuf::from)
-        //                 .unwrap_or_else(workflows::expense_report::default_statement_path);
-        //             let out_path = Path::new(&output);
-        //             let written = workflows::expense_report::run_expense_report_workflow(&statement_path, out_path)?;
-        //             println!(
-        //                 "Expense report written to {}.\n  Open it to see spending by category and monthly totals.",
-        //                 written.display()
-        //             );
-        //         }
-        //         Some(Commands::StockReport { csv, output }) => {
-        //             let csv_path = csv
-        //                 .map(std::path::PathBuf::from)
-        //                 .unwrap_or_else(workflows::stock_report::default_csv_path);
-        //             let out_path = Path::new(&output);
-        //             workflows::stock_report::run_stock_report_workflow(&csv_path, out_path)?;
-        //             println!("Stock report written to {}.", out_path.display());
-        //         }
-        //         Some(Commands::CyclicDemo) => {
-        //             let result = workflows::cyclic_demo_workflow()?;
-        //             println!("Cyclic demo completed. Sink output: {:?}", result);
-        //         }
-        //         Some(Commands::PrintReadme { path }) => {
-        //             let output = workflows::print_readme_workflow(&path)?;
-        //             println!("{}", output);
-        //         }
-        //         Some(Commands::SingleFileRead { path }) => {
-        //             let output = workflows::single_file_read_workflow(&path)?;
-        //             println!("{}", output);
-        //         }
-        //         Some(Commands::CopyFiles { pairs }) => {
-        //             if pairs.is_empty() {
-        //                 eprintln!("copy-files requires at least one pair (e.g. \"src.txt:dst.txt\")");
-        //                 std::process::exit(1);
-        //             }
-        //             let parsed: Vec<(&str, &str)> = pairs
-        //                 .iter()
-        //                 .map(|s| {
-        //                     let mut split = s.splitn(2, ':');
-        //                     let src = split.next().unwrap_or("");
-        //                     let dst = split.next().unwrap_or("");
-        //                     (src, dst)
-        //                 })
-        //                 .collect();
-        //             workflows::copy_files_workflow(&parsed)?;
-        //             println!("Copy completed.");
-        //         }
-        //         Some(Commands::InvoiceLineProcessor { input }) => {
-        //             let path = input
-        //                 .map(std::path::PathBuf::from)
-        //                 .unwrap_or_else(workflows::invoice_line_processor::default_invoice_path);
-        //             let out = workflows::run_invoice_line_processor_workflow(&path)?;
-        //             println!("Invoice line processor output: {}", out);
-        //         }
-        //         Some(Commands::PriceDropChecker {
-        //             output,
-        //             url,
-        //             price_stub,
-        //         }) => {
-        //             let written =
-        //                 workflows::run_price_drop_checker_workflow(&output, url.as_deref(), price_stub)?;
-        //             println!("Price drop notify written to {}", written);
-        //         }
-        //         Some(Commands::NewsAggregator { urls }) => {
-        //             let url_list = urls
-        //                 .as_ref()
-        //                 .map(|s| s.split(',').map(str::trim).map(String::from).collect());
-        //             let out = workflows::run_news_aggregator_workflow(url_list)?;
-        //             println!("News aggregator report:\n{}", out);
-        //         }
-        //         Some(Commands::RetryUntilSuccess { stub_status }) => {
-        //             let out = workflows::run_retry_until_success_workflow(&stub_status)?;
-        //             println!("Retry until success output: {}", out);
-        //         }
-        //         Some(Commands::ChildWorkflowDemo) => {
-        //             let out = workflows::child_workflow_demo_workflow()?;
-        //             println!("Child workflow demo output: {}", out);
-        //         }
-        //         Some(Commands::ContextPayloadDemo { url }) => {
-        //             let out = workflows::run_context_payload_demo_workflow(url.as_deref())?;
-        //             println!("Context/payload demo output: {}", out);
-        //         }
         Some(Commands::PersonalReports {
             data_dir,
             daily_notes_dir,
@@ -274,23 +226,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             email_out,
         }) => {
             let base = data_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(default_personal_reports_data_dir);
+            let observability_log_path = base.join("logs").join("orchestrator.jsonl");
+            configure_observability_defaults();
+            print_observability_status(&observability_log_path);
             workflows::ensure_dummy_data(&base)?;
             let daily_notes = daily_notes_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("daily_notes"));
             let reports = reports_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("reports"));
             let template = template_path
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("email_template.hbs"));
             let next_day = next_day_note_path
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("next_day_note.md"));
             let email_out = email_out
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("personal_reports_email.html"));
             workflows::run_personal_reports_workflow(
                 &daily_notes,
@@ -320,27 +275,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_items,
         }) => {
             let base = data_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(default_ai_news_digest_data_dir);
             workflows::ensure_ai_news_digest_dummy_data(&base)?;
             let feeds = feeds_file
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("feeds.txt"));
             let prompt = prompt_file
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("prompt.md"));
             let email_tpl = email_template
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("email_template.hbs"));
             let templates = template_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("templates"));
             let state = state_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("state"));
             let logs = logs_dir
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|| base.join("logs"));
+            let observability_log_path = logs.join("orchestrator.jsonl");
+            configure_observability_defaults();
+            print_observability_status(&observability_log_path);
             workflows::run_ai_news_digest_workflow(workflows::AiNewsDigestWorkflowConfig {
                 feeds_file: &feeds,
                 prompt_file: &prompt,
@@ -358,6 +316,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "AI news digest workflow completed. State/logs are under {}",
                 base.display()
+            );
+        }
+        Some(Commands::TrialActivationNudge {
+            data_dir,
+            endpoint,
+            to,
+            subject,
+            cron,
+            use_cron,
+            trials_payload_file,
+            nudge_template,
+            error_template,
+            email_out,
+            error_log,
+        }) => {
+            let base = data_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(default_trial_activation_nudge_data_dir);
+            let observability_log_path = base.join("logs").join("orchestrator.jsonl");
+            configure_observability_defaults();
+            print_observability_status(&observability_log_path);
+            workflows::ensure_trial_activation_nudge_dummy_data(&base)?;
+
+            let trials_payload = trials_payload_file
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.join("trials_not_activated.json"));
+            let nudge_template = nudge_template
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.join("nudge_template.hbs"));
+            let error_template = error_template
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.join("error_template.hbs"));
+            let email_out = email_out
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.join("email_preview.html"));
+            let error_log = error_log
+                .map(PathBuf::from)
+                .unwrap_or_else(|| base.join("error_log.jsonl"));
+
+            workflows::run_trial_activation_nudge_workflow(
+                workflows::TrialActivationNudgeWorkflowConfig {
+                    endpoint_url: &endpoint,
+                    to_email: &to,
+                    subject: &subject,
+                    cron_expr: &cron,
+                    use_cron,
+                    nudge_template_path: &nudge_template,
+                    error_template_path: &error_template,
+                    trials_payload_path: &trials_payload,
+                    email_out_path: &email_out,
+                    error_log_path: &error_log,
+                },
+            )?;
+
+            println!(
+                "Trial activation nudge workflow completed. Email preview: {} | Error log: {}",
+                email_out.display(),
+                error_log.display()
             );
         }
         None => {

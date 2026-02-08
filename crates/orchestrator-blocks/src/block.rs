@@ -9,8 +9,8 @@ use crate::{
     FileWriteConfig, HttpRequestConfig, ListDirectoryConfig, RssParseConfig, SelectFirstConfig,
     SendEmailConfig, SplitByKeysConfig, SplitLinesConfig, TemplateHandlebarsConfig,
 };
-use orchestrator_core::WorkflowDefinition;
 use orchestrator_core::block::{BlockConfig, ChildWorkflowConfig};
+use orchestrator_core::{BlockId, RetryPolicy, Workflow, WorkflowDefinition, WorkflowEndpoint};
 
 /// User-facing block: build with optional config, then add to a workflow.
 #[derive(Debug, Clone)]
@@ -21,6 +21,7 @@ pub enum Block {
         prompt: String,
         api_key_env: String,
         timeout_ms: Option<u64>,
+        retry_policy: RetryPolicy,
     },
     Cron {
         cron: String,
@@ -29,6 +30,7 @@ pub enum Block {
         url: Option<String>,
         timeout_ms: Option<u64>,
         user_agent: Option<String>,
+        retry_policy: RetryPolicy,
     },
     ListDirectory {
         path: Option<String>,
@@ -68,13 +70,29 @@ pub enum Block {
     SendEmail {
         to: String,
         subject: Option<String>,
+        timeout_ms: Option<u64>,
+        retry_policy: RetryPolicy,
     },
     ChildWorkflow {
         definition: WorkflowDefinition,
+        timeout_ms: Option<u64>,
+        retry_policy: RetryPolicy,
     },
 }
 
 impl Block {
+    fn default_http_retry_policy() -> RetryPolicy {
+        RetryPolicy::exponential(2, 1_000, 2.0)
+    }
+
+    fn default_email_retry_policy() -> RetryPolicy {
+        RetryPolicy::exponential(3, 1_000, 2.0)
+    }
+
+    fn default_ai_retry_policy() -> RetryPolicy {
+        RetryPolicy::exponential(2, 2_000, 2.0)
+    }
+
     pub fn ai_generate(
         prompt: impl Into<String>,
         provider: Option<impl Into<String>>,
@@ -92,7 +110,8 @@ impl Block {
             api_key_env: api_key_env
                 .map(|k| k.into())
                 .unwrap_or_else(|| "OPENAI_API_KEY".to_string()),
-            timeout_ms: None,
+            timeout_ms: Some(120_000),
+            retry_policy: Self::default_ai_retry_policy(),
         }
     }
 
@@ -103,8 +122,9 @@ impl Block {
     pub fn http_request(url: Option<impl Into<String>>) -> Self {
         Block::HttpRequest {
             url: url.map(Into::into),
-            timeout_ms: None,
+            timeout_ms: Some(30_000),
             user_agent: None,
+            retry_policy: Self::default_http_retry_policy(),
         }
     }
 
@@ -202,11 +222,98 @@ impl Block {
         Block::SendEmail {
             to: to.into(),
             subject: subject.map(|s| s.into()),
+            timeout_ms: Some(30_000),
+            retry_policy: Self::default_email_retry_policy(),
         }
     }
 
     pub fn child_workflow(definition: WorkflowDefinition) -> Self {
-        Block::ChildWorkflow { definition }
+        Block::ChildWorkflow {
+            definition,
+            timeout_ms: None,
+            retry_policy: RetryPolicy::none(),
+        }
+    }
+
+    pub fn set_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        let timeout = Some(timeout_ms.max(1));
+        match &mut self {
+            Block::AiGenerate { timeout_ms, .. }
+            | Block::HttpRequest { timeout_ms, .. }
+            | Block::SendEmail { timeout_ms, .. }
+            | Block::ChildWorkflow { timeout_ms, .. } => {
+                *timeout_ms = timeout;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn clear_timeout(mut self) -> Self {
+        match &mut self {
+            Block::AiGenerate { timeout_ms, .. }
+            | Block::HttpRequest { timeout_ms, .. }
+            | Block::SendEmail { timeout_ms, .. }
+            | Block::ChildWorkflow { timeout_ms, .. } => {
+                *timeout_ms = None;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn set_retry_exponential(
+        mut self,
+        max_retries: u32,
+        initial_backoff_ms: u64,
+        backoff_factor: f64,
+    ) -> Self {
+        let retry_policy =
+            RetryPolicy::exponential(max_retries, initial_backoff_ms, backoff_factor);
+        match &mut self {
+            Block::AiGenerate {
+                retry_policy: r, ..
+            }
+            | Block::HttpRequest {
+                retry_policy: r, ..
+            }
+            | Block::SendEmail {
+                retry_policy: r, ..
+            }
+            | Block::ChildWorkflow {
+                retry_policy: r, ..
+            } => {
+                *r = retry_policy;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn clear_retry(mut self) -> Self {
+        match &mut self {
+            Block::AiGenerate { retry_policy, .. }
+            | Block::HttpRequest { retry_policy, .. }
+            | Block::SendEmail { retry_policy, .. }
+            | Block::ChildWorkflow { retry_policy, .. } => {
+                *retry_policy = RetryPolicy::none();
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn set_max_backoff_ms(mut self, max_backoff_ms: u64) -> Self {
+        match &mut self {
+            Block::AiGenerate { retry_policy, .. }
+            | Block::HttpRequest { retry_policy, .. }
+            | Block::SendEmail { retry_policy, .. }
+            | Block::ChildWorkflow { retry_policy, .. } => {
+                *retry_policy = retry_policy.clone().with_max_backoff_ms(max_backoff_ms);
+            }
+            _ => {}
+        }
+        self
     }
 
     /// Convert this block to a BlockConfig for adding to a workflow.
@@ -224,6 +331,7 @@ impl From<Block> for BlockConfig {
                 prompt,
                 api_key_env,
                 timeout_ms,
+                retry_policy,
             } => BlockConfig::Custom {
                 type_id: "ai_generate".to_string(),
                 payload: serde_json::to_value(AiGenerateConfig {
@@ -232,6 +340,7 @@ impl From<Block> for BlockConfig {
                     prompt,
                     api_key_env,
                     timeout_ms,
+                    retry_policy,
                 })
                 .unwrap(),
             },
@@ -243,12 +352,14 @@ impl From<Block> for BlockConfig {
                 url,
                 timeout_ms,
                 user_agent,
+                retry_policy,
             } => BlockConfig::Custom {
                 type_id: "http_request".to_string(),
                 payload: serde_json::to_value(HttpRequestConfig {
                     url,
                     timeout_ms,
                     user_agent,
+                    retry_policy,
                 })
                 .unwrap(),
             },
@@ -319,19 +430,101 @@ impl From<Block> for BlockConfig {
                 payload: serde_json::to_value(TemplateHandlebarsConfig { template, partials })
                     .unwrap(),
             },
-            Block::SendEmail { to, subject } => BlockConfig::Custom {
+            Block::SendEmail {
+                to,
+                subject,
+                timeout_ms,
+                retry_policy,
+            } => BlockConfig::Custom {
                 type_id: "send_email".to_string(),
                 payload: serde_json::to_value(SendEmailConfig {
                     to,
                     subject,
                     smtp_host: None,
                     smtp_port: None,
+                    timeout_ms,
+                    retry_policy,
                 })
                 .unwrap(),
             },
-            Block::ChildWorkflow { definition } => {
-                BlockConfig::ChildWorkflow(ChildWorkflowConfig::new(definition))
+            Block::ChildWorkflow {
+                definition,
+                timeout_ms,
+                retry_policy,
+            } => BlockConfig::ChildWorkflow(
+                ChildWorkflowConfig::new(definition)
+                    .with_timeout_ms(timeout_ms)
+                    .with_retry_policy(retry_policy),
+            ),
+        }
+    }
+}
+
+impl WorkflowEndpoint for Block {
+    fn resolve(self, workflow: &mut Workflow) -> BlockId {
+        workflow.add(self)
+    }
+}
+
+impl WorkflowEndpoint for &Block {
+    fn resolve(self, workflow: &mut Workflow) -> BlockId {
+        workflow.add_ref(self as *const Block as usize, self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_block_policy_setters_are_serialized_into_config() {
+        let cfg: BlockConfig = Block::http_request(Some("https://example.com"))
+            .set_timeout_ms(45_000)
+            .set_retry_exponential(4, 500, 2.0)
+            .set_max_backoff_ms(5_000)
+            .into();
+
+        match cfg {
+            BlockConfig::Custom { type_id, payload } => {
+                assert_eq!(type_id, "http_request");
+                assert_eq!(
+                    payload.get("timeout_ms").and_then(|v| v.as_u64()),
+                    Some(45_000)
+                );
+                let retry = payload.get("retry_policy").expect("retry_policy");
+                assert_eq!(retry.get("max_retries").and_then(|v| v.as_u64()), Some(4));
+                assert_eq!(
+                    retry.get("initial_backoff_ms").and_then(|v| v.as_u64()),
+                    Some(500)
+                );
+                assert_eq!(
+                    retry.get("max_backoff_ms").and_then(|v| v.as_u64()),
+                    Some(5_000)
+                );
             }
+            _ => panic!("expected custom http_request config"),
+        }
+    }
+
+    #[test]
+    fn send_email_defaults_include_timeout_and_retry_policy() {
+        let cfg: BlockConfig = Block::send_email("user@example.com", Some("Subject")).into();
+        match cfg {
+            BlockConfig::Custom { type_id, payload } => {
+                assert_eq!(type_id, "send_email");
+                assert_eq!(
+                    payload.get("timeout_ms").and_then(|v| v.as_u64()),
+                    Some(30_000)
+                );
+                assert_eq!(
+                    payload
+                        .get("retry_policy")
+                        .and_then(|p| p.get("max_retries"))
+                        .and_then(|v| v.as_u64()),
+                    Some(3)
+                );
+            }
+            _ => panic!("expected custom send_email config"),
         }
     }
 }

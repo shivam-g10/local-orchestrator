@@ -189,8 +189,10 @@ mod tests {
 
 pub mod child_workflow;
 pub mod config;
+pub mod policy;
 pub mod registry;
 
 pub use child_workflow::ChildWorkflowConfig;
 pub use config::BlockConfig;
+pub use policy::RetryPolicy;
 pub use registry::BlockRegistry;

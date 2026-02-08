@@ -7,7 +7,9 @@ mod openai;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
+use orchestrator_core::RetryPolicy;
 use orchestrator_core::block::{
     BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
@@ -33,7 +35,7 @@ pub trait AiGenerator: Send + Sync {
     ) -> Result<String, AiGenerateError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiGenerateConfig {
     pub provider: String,
     pub model: String,
@@ -42,6 +44,8 @@ pub struct AiGenerateConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default = "default_retry_policy")]
+    pub retry_policy: RetryPolicy,
 }
 
 fn default_api_key_env() -> String {
@@ -55,9 +59,14 @@ impl AiGenerateConfig {
             model: "gpt-5-nano".to_string(),
             prompt: prompt.into(),
             api_key_env: default_api_key_env(),
-            timeout_ms: None,
+            timeout_ms: Some(120_000),
+            retry_policy: default_retry_policy(),
         }
     }
+}
+
+fn default_retry_policy() -> RetryPolicy {
+    RetryPolicy::exponential(2, 2_000, 2.0)
 }
 
 pub struct AiGenerateBlock {
@@ -68,6 +77,29 @@ pub struct AiGenerateBlock {
 impl AiGenerateBlock {
     pub fn new(config: AiGenerateConfig, generator: Arc<dyn AiGenerator>) -> Self {
         Self { config, generator }
+    }
+}
+
+fn block_input_kind(input: &BlockInput) -> &'static str {
+    match input {
+        BlockInput::Empty => "empty",
+        BlockInput::String(_) => "string",
+        BlockInput::Text(_) => "text",
+        BlockInput::Json(_) => "json",
+        BlockInput::List { .. } => "list",
+        BlockInput::Multi { .. } => "multi",
+        BlockInput::Error { .. } => "error",
+    }
+}
+
+fn json_shape(value: &serde_json::Value) -> (&'static str, u64) {
+    match value {
+        serde_json::Value::Null => ("null", 0),
+        serde_json::Value::Bool(_) => ("bool", 1),
+        serde_json::Value::Number(_) => ("number", 1),
+        serde_json::Value::String(s) => ("string", s.len() as u64),
+        serde_json::Value::Array(items) => ("array", items.len() as u64),
+        serde_json::Value::Object(fields) => ("object", fields.len() as u64),
     }
 }
 
@@ -82,6 +114,7 @@ impl BlockExecutor for AiGenerateBlock {
             return Err(BlockError::Other(message.clone()));
         }
 
+        let input_kind = block_input_kind(&input);
         let payload = match input {
             BlockInput::Json(v) => v,
             BlockInput::String(s) => serde_json::json!({ "input": s }),
@@ -93,15 +126,144 @@ impl BlockExecutor for AiGenerateBlock {
             BlockInput::Empty => serde_json::json!({}),
             BlockInput::Error { .. } => unreachable!(),
         };
+        let (payload_kind, payload_units) = json_shape(&payload);
+        debug!(
+            event = "ai.generate_configured",
+            domain = "ai",
+            block_type = "ai_generate",
+            input_kind = input_kind,
+            provider = self.config.provider.as_str(),
+            model = self.config.model.as_str(),
+            prompt_len = self.config.prompt.len() as u64,
+            payload_kind = payload_kind,
+            payload_units = payload_units,
+            timeout_ms = ?self.config.timeout_ms,
+            max_retries = self.config.retry_policy.max_retries
+        );
 
-        let markdown = self
-            .generator
-            .generate_markdown(&self.config, &payload)
-            .map_err(|e| BlockError::Other(e.0))?;
-        Ok(BlockExecutionResult::Once(BlockOutput::Text {
-            value: markdown,
-        }))
+        let mut retries_done = 0u32;
+        loop {
+            let attempt = retries_done + 1;
+            debug!(
+                event = "ai.generate_attempt",
+                domain = "ai",
+                block_type = "ai_generate",
+                attempt = attempt,
+                provider = self.config.provider.as_str(),
+                model = self.config.model.as_str()
+            );
+            match self.generator.generate_markdown(&self.config, &payload) {
+                Ok(markdown) => {
+                    debug!(
+                        event = "ai.generate_succeeded",
+                        domain = "ai",
+                        block_type = "ai_generate",
+                        attempt = attempt,
+                        output_len = markdown.len() as u64
+                    );
+                    return Ok(BlockExecutionResult::Once(BlockOutput::Text {
+                        value: markdown,
+                    }));
+                }
+                Err(err) => {
+                    let (code, retryable, provider_status) = classify_ai_error(&err.0);
+                    let can_retry = retryable && self.config.retry_policy.can_retry(retries_done);
+                    debug!(
+                        event = "ai.generate_failed",
+                        domain = "ai",
+                        block_type = "ai_generate",
+                        code = code,
+                        attempt = attempt,
+                        retryable = retryable,
+                        can_retry = can_retry,
+                        provider_status = ?provider_status,
+                        error = %err,
+                        error_len = err.0.len() as u64
+                    );
+                    if can_retry {
+                        let backoff = self.config.retry_policy.backoff_duration(retries_done);
+                        info!(
+                            event = "block.retry_scheduled",
+                            domain = "ai",
+                            block_type = "ai_generate",
+                            code = code,
+                            attempt = retries_done + 1,
+                            next_attempt = retries_done + 2,
+                            backoff_ms = backoff.as_millis() as u64
+                        );
+                        std::thread::sleep(backoff);
+                        retries_done += 1;
+                        continue;
+                    }
+                    debug!(
+                        event = "ai.generate_retry_exhausted",
+                        domain = "ai",
+                        block_type = "ai_generate",
+                        code = code,
+                        attempt = attempt
+                    );
+                    return Err(BlockError::Other(error_payload_json(
+                        "ai",
+                        code,
+                        &err.0,
+                        provider_status.as_deref(),
+                        retries_done + 1,
+                    )));
+                }
+            }
+        }
     }
+}
+
+fn classify_ai_error(message: &str) -> (&'static str, bool, Option<String>) {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("missing api key") || lower.contains("status=401") {
+        return ("ai.auth", false, extract_status_code(message));
+    }
+    if lower.contains("rate") || lower.contains("status=429") {
+        return ("ai.rate_limited", true, extract_status_code(message));
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return ("ai.timeout", true, None);
+    }
+    if lower.contains("status=5") {
+        return ("ai.provider_5xx", true, extract_status_code(message));
+    }
+    if lower.contains("did not include output text") {
+        return ("ai.invalid_response", false, None);
+    }
+    ("ai.invalid_response", false, extract_status_code(message))
+}
+
+fn extract_status_code(message: &str) -> Option<String> {
+    let marker = "status=";
+    let idx = message.find(marker)?;
+    let tail = &message[idx + marker.len()..];
+    let value: String = tail
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn error_payload_json(
+    domain: &str,
+    code: &str,
+    message: &str,
+    provider_status: Option<&str>,
+    attempt: u32,
+) -> String {
+    serde_json::json!({
+        "origin": "block",
+        "domain": domain,
+        "code": code,
+        "message": message,
+        "provider_status": provider_status,
+        "attempt": attempt,
+        "retry_disposition": "never",
+        "severity": "error"
+    })
+    .to_string()
 }
 
 fn output_to_value(o: &BlockOutput) -> serde_json::Value {

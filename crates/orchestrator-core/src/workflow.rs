@@ -13,6 +13,32 @@ use crate::runtime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(Uuid);
 
+/// Endpoint accepted by [`Workflow::link`] and [`Workflow::on_error`].
+///
+/// Implementations can resolve to an existing block id, add a new block, or reuse a previously
+/// seen block reference.
+pub trait WorkflowEndpoint {
+    fn resolve(self, workflow: &mut Workflow) -> BlockId;
+}
+
+impl WorkflowEndpoint for BlockId {
+    fn resolve(self, _workflow: &mut Workflow) -> BlockId {
+        self
+    }
+}
+
+impl WorkflowEndpoint for BlockConfig {
+    fn resolve(self, workflow: &mut Workflow) -> BlockId {
+        workflow.add(self)
+    }
+}
+
+impl WorkflowEndpoint for &BlockConfig {
+    fn resolve(self, workflow: &mut Workflow) -> BlockId {
+        workflow.add_ref(self as *const BlockConfig as usize, self.clone())
+    }
+}
+
 /// Public run failure type (internal runtime error).
 pub type RunError = runtime::RuntimeError;
 
@@ -20,6 +46,7 @@ pub type RunError = runtime::RuntimeError;
 pub struct Workflow {
     def_id: Uuid,
     nodes: HashMap<Uuid, BlockConfig>,
+    ref_index: HashMap<usize, BlockId>,
     edges: Vec<(Uuid, Uuid)>,
     error_edges: Vec<(Uuid, Uuid)>,
     entry: Option<Uuid>,
@@ -32,6 +59,7 @@ impl Workflow {
         Self {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
+            ref_index: HashMap::new(),
             edges: Vec::new(),
             error_edges: Vec::new(),
             entry: None,
@@ -44,6 +72,7 @@ impl Workflow {
         Self {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
+            ref_index: HashMap::new(),
             edges: Vec::new(),
             error_edges: Vec::new(),
             entry: None,
@@ -60,6 +89,18 @@ impl Workflow {
         }
         self.nodes.insert(id, config.into());
         BlockId(id)
+    }
+
+    /// Add (or reuse) a block by a stable in-process reference key.
+    /// This powers ergonomic linking with block references, so users can reuse the same block
+    /// instance across multiple links without manual id plumbing.
+    pub fn add_ref(&mut self, ref_key: usize, config: impl Into<BlockConfig>) -> BlockId {
+        if let Some(existing) = self.ref_index.get(&ref_key).copied() {
+            return existing;
+        }
+        let id = self.add(config);
+        self.ref_index.insert(ref_key, id);
+        id
     }
 
     /// Add a child workflow node. Convenience for `add(BlockConfig::ChildWorkflow(ChildWorkflowConfig::new(definition)))`.
@@ -95,18 +136,40 @@ impl Workflow {
     }
 
     /// Link output of `from` to input of `to`. Optional for single-block workflows.
-    pub fn link(&mut self, from: BlockId, to: BlockId) {
+    pub fn link<F, T>(&mut self, from: F, to: T)
+    where
+        F: WorkflowEndpoint,
+        T: WorkflowEndpoint,
+    {
+        let from = from.resolve(self);
+        let to = to.resolve(self);
         self.edges.push((from.0, to.0));
     }
 
     /// Link error of `from` to `to`. When `from` returns an error at runtime, `to` receives
     /// `BlockInput::Error { message }`.
-    pub fn link_on_error(&mut self, from: BlockId, to: BlockId) {
+    pub fn on_error<F, T>(&mut self, from: F, to: T)
+    where
+        F: WorkflowEndpoint,
+        T: WorkflowEndpoint,
+    {
+        let from = from.resolve(self);
+        let to = to.resolve(self);
         self.error_edges.push((from.0, to.0));
+    }
+
+    /// Compatibility alias for [`Workflow::on_error`].
+    pub fn link_on_error<F, T>(&mut self, from: F, to: T)
+    where
+        F: WorkflowEndpoint,
+        T: WorkflowEndpoint,
+    {
+        self.on_error(from, to);
     }
 
     /// Run the workflow (sync). Blocks until complete. Returns the sink block's output or [`RunError`].
     pub fn run(&self) -> Result<BlockOutput, RunError> {
+        crate::observability::init_observability();
         let def = self.build_definition();
         let mut run = WorkflowRun::new(&def);
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -118,6 +181,7 @@ impl Workflow {
 
     /// Run the workflow (async). Returns the sink block's output or [`RunError`]. Call with `.await`.
     pub async fn run_async(&self) -> Result<BlockOutput, RunError> {
+        crate::observability::init_observability();
         let def = self.build_definition();
         let mut run = WorkflowRun::new(&def);
         runtime::run_workflow(&def, &mut run, &self.registry, None).await
@@ -187,6 +251,7 @@ impl From<Workflow> for WorkflowDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::RetryPolicy;
     use crate::block::{BlockExecutor, BlockInput, BlockOutput};
     use serde::Serialize;
     use serde_json::json;
@@ -593,6 +658,37 @@ mod tests {
             "run should fail even when on_error handler runs"
         );
         let logged = std::fs::read_to_string(&error_file).expect("error file should be written");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&logged).expect("on_error payload should be json");
+        assert_eq!(
+            envelope.get("code").and_then(|v| v.as_str()),
+            Some("block.error")
+        );
+        assert_eq!(envelope.get("attempt").and_then(|v| v.as_u64()), Some(1));
+        let workflow_id = envelope
+            .get("workflow_id")
+            .and_then(|v| v.as_str())
+            .expect("workflow_id");
+        assert!(
+            uuid::Uuid::parse_str(workflow_id).is_ok(),
+            "workflow_id should be uuid"
+        );
+        let run_id = envelope
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .expect("run_id");
+        assert!(
+            uuid::Uuid::parse_str(run_id).is_ok(),
+            "run_id should be uuid"
+        );
+        let block_id = envelope
+            .get("block_id")
+            .and_then(|v| v.as_str())
+            .expect("block_id");
+        assert!(
+            uuid::Uuid::parse_str(block_id).is_ok(),
+            "block_id should be uuid"
+        );
         assert!(
             logged.contains("boom"),
             "handler should receive original error message"
@@ -648,9 +744,11 @@ mod tests {
                         .to_string(),
                     ));
                 }
-                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Text {
-                    value: "ok".to_string(),
-                }))
+                Ok(crate::block::BlockExecutionResult::Once(
+                    BlockOutput::Text {
+                        value: "ok".to_string(),
+                    },
+                ))
             }
         }
 
@@ -683,5 +781,284 @@ mod tests {
             2,
             "expected block to run on both recurring ticks"
         );
+    }
+
+    #[test]
+    fn link_with_blockconfig_reference_reuses_registered_block() {
+        let mut w = Workflow::new();
+        let a = BlockConfig::Custom {
+            type_id: "a".to_string(),
+            payload: json!({"k":"a"}),
+        };
+        let b = BlockConfig::Custom {
+            type_id: "b".to_string(),
+            payload: json!({"k":"b"}),
+        };
+
+        w.link(&a, &b);
+        w.link(&a, &b);
+
+        assert_eq!(w.nodes.len(), 2, "expected reference endpoints to dedupe");
+        assert_eq!(w.edges.len(), 2, "expected both links to be recorded");
+    }
+
+    #[test]
+    fn link_with_inline_blockconfig_values_is_one_shot() {
+        let mut w = Workflow::new();
+
+        w.link(
+            BlockConfig::Custom {
+                type_id: "a".to_string(),
+                payload: json!({"k":"a"}),
+            },
+            BlockConfig::Custom {
+                type_id: "b".to_string(),
+                payload: json!({"k":"b"}),
+            },
+        );
+        w.link(
+            BlockConfig::Custom {
+                type_id: "a".to_string(),
+                payload: json!({"k":"a"}),
+            },
+            BlockConfig::Custom {
+                type_id: "b".to_string(),
+                payload: json!({"k":"b"}),
+            },
+        );
+
+        assert_eq!(w.nodes.len(), 4, "expected inline endpoints to be one-shot");
+        assert_eq!(w.edges.len(), 2);
+    }
+
+    #[test]
+    fn on_error_and_link_on_error_both_add_error_edges() {
+        let mut w = Workflow::new();
+        let src = BlockConfig::Custom {
+            type_id: "src".to_string(),
+            payload: json!({}),
+        };
+        let handler = BlockConfig::Custom {
+            type_id: "handler".to_string(),
+            payload: json!({}),
+        };
+
+        w.on_error(&src, &handler);
+        w.link_on_error(&src, &handler);
+
+        assert_eq!(w.error_edges.len(), 2);
+        assert_eq!(
+            w.nodes.len(),
+            2,
+            "expected handler/src refs to resolve to stable block ids"
+        );
+    }
+
+    #[test]
+    fn multiple_on_error_handlers_execute_in_parallel() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+
+        struct AlwaysFailBlock;
+        impl BlockExecutor for AlwaysFailBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Err(crate::block::BlockError::Other("boom".into()))
+            }
+        }
+
+        struct ParallelProbeHandler {
+            active: Arc<AtomicUsize>,
+            max_active: Arc<AtomicUsize>,
+        }
+        impl BlockExecutor for ParallelProbeHandler {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let now_active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut prev_max = self.max_active.load(Ordering::SeqCst);
+                while now_active > prev_max
+                    && self
+                        .max_active
+                        .compare_exchange(prev_max, now_active, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
+                {
+                    prev_max = self.max_active.load(Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
+            }
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
+        let a1 = Arc::clone(&active);
+        let m1 = Arc::clone(&max_active);
+        registry.register_custom("handler_a", move |_| {
+            Ok(Box::new(ParallelProbeHandler {
+                active: Arc::clone(&a1),
+                max_active: Arc::clone(&m1),
+            }))
+        });
+        let a2 = Arc::clone(&active);
+        let m2 = Arc::clone(&max_active);
+        registry.register_custom("handler_b", move |_| {
+            Ok(Box::new(ParallelProbeHandler {
+                active: Arc::clone(&a2),
+                max_active: Arc::clone(&m2),
+            }))
+        });
+
+        let mut w = Workflow::with_registry(registry);
+        let fail_id = w
+            .add_custom("always_fail", serde_json::json!({}))
+            .expect("add always_fail");
+        let handler_a = w
+            .add_custom("handler_a", serde_json::json!({}))
+            .expect("add handler_a");
+        let handler_b = w
+            .add_custom("handler_b", serde_json::json!({}))
+            .expect("add handler_b");
+        w.on_error(fail_id, handler_a);
+        w.on_error(fail_id, handler_b);
+
+        let result = w.run();
+        assert!(result.is_err(), "run should fail from source block error");
+        assert!(
+            max_active.load(Ordering::SeqCst) >= 2,
+            "expected at least two handlers to overlap in time"
+        );
+    }
+
+    #[test]
+    fn on_error_handler_failure_does_not_replace_source_failure() {
+        struct AlwaysFailBlock;
+        impl BlockExecutor for AlwaysFailBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Err(crate::block::BlockError::Other("source boom".into()))
+            }
+        }
+
+        struct HandlerFail;
+        impl BlockExecutor for HandlerFail {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Err(crate::block::BlockError::Other("handler boom".into()))
+            }
+        }
+
+        struct HandlerOk;
+        impl BlockExecutor for HandlerOk {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
+            }
+        }
+
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
+        registry.register_custom("handler_fail", |_| Ok(Box::new(HandlerFail)));
+        registry.register_custom("handler_ok", |_| Ok(Box::new(HandlerOk)));
+
+        let mut w = Workflow::with_registry(registry);
+        let fail_id = w
+            .add_custom("always_fail", serde_json::json!({}))
+            .expect("add always_fail");
+        let handler_fail = w
+            .add_custom("handler_fail", serde_json::json!({}))
+            .expect("add handler_fail");
+        let handler_ok = w
+            .add_custom("handler_ok", serde_json::json!({}))
+            .expect("add handler_ok");
+
+        w.on_error(fail_id, handler_fail);
+        w.on_error(fail_id, handler_ok);
+
+        let err = w.run().expect_err("source failure should fail workflow");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("source boom"),
+            "expected source error to be preserved, got: {msg}"
+        );
+        assert!(
+            !msg.contains("handler boom"),
+            "handler failure should not replace source error: {msg}"
+        );
+    }
+
+    #[test]
+    fn child_workflow_retries_at_parent_boundary() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct FlakyBlock {
+            calls: Arc<AtomicUsize>,
+        }
+        impl BlockExecutor for FlakyBlock {
+            fn execute(
+                &self,
+                _input: BlockInput,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(crate::block::BlockError::Other("first failure".into()));
+                }
+                Ok(crate::block::BlockExecutionResult::Once(
+                    BlockOutput::String { value: "ok".into() },
+                ))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = BlockRegistry::new();
+        let calls_for_flaky = Arc::clone(&calls);
+        registry.register_custom("flaky", move |_| {
+            Ok(Box::new(FlakyBlock {
+                calls: Arc::clone(&calls_for_flaky),
+            }))
+        });
+
+        let child_entry = Uuid::new_v4();
+        let child_def = WorkflowDefinition::builder()
+            .add_node(
+                child_entry,
+                BlockConfig::Custom {
+                    type_id: "flaky".to_string(),
+                    payload: json!({}),
+                },
+            )
+            .set_entry(child_entry)
+            .build();
+
+        let mut w = Workflow::with_registry(registry);
+        let child_id = w.add(BlockConfig::ChildWorkflow(
+            crate::block::ChildWorkflowConfig::new(child_def)
+                .with_retry_policy(RetryPolicy::exponential(1, 1, 1.0)),
+        ));
+
+        let output = w.run().expect("child should succeed after one retry");
+        let out: Option<String> = output.into();
+        assert_eq!(out.as_deref(), Some("ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let _ = child_id; // keep explicit id usage in test for readability.
     }
 }

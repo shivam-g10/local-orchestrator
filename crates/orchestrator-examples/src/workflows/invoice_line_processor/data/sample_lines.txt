@@ -1,3 +1,0 @@
-INV-001,Widget A,10.00
-INV-002,Widget B,25.50
-INV-003,Widget C,8.99

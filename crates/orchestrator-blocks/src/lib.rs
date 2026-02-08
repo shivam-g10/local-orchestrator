@@ -77,7 +77,8 @@ pub use template_handlebars::{
 };
 
 pub use orchestrator_core::{
-    BlockConfig, BlockId, BlockOutput, BlockRegistry, RunError, Workflow, WorkflowDefinition,
+    BlockConfig, BlockId, BlockOutput, BlockRegistry, RetryPolicy, RunError, Workflow,
+    WorkflowDefinition,
 };
 
 /// Create a registry with built-in blocks (Cron, FileRead, FileWrite, SendEmail, etc.)
