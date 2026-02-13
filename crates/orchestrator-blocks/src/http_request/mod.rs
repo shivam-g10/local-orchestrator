@@ -9,9 +9,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::RetryPolicy;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 pub use reqwest_requester::ReqwestHttpRequester;
@@ -72,11 +76,21 @@ impl HttpRequestConfig {
 pub struct HttpRequestBlock {
     config: HttpRequestConfig,
     requester: Arc<dyn HttpRequester>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl HttpRequestBlock {
     pub fn new(config: HttpRequestConfig, requester: Arc<dyn HttpRequester>) -> Self {
-        Self { config, requester }
+        Self {
+            config,
+            requester,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
@@ -101,18 +115,40 @@ fn url_host(url: &str) -> Option<&str> {
         .filter(|host| !host.is_empty())
 }
 
+fn url_from_input(input: &BlockInput) -> Option<String> {
+    match input {
+        BlockInput::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        BlockInput::Text(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        BlockInput::Json(v) => v
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                v.get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
 impl BlockExecutor for HttpRequestBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
 
-        let url = match &input {
-            BlockInput::String(s) if !s.trim().is_empty() => s.trim().to_string(),
-            BlockInput::Text(s) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => self.config.url.clone().ok_or_else(|| {
+        let url = if !self.input_from.is_empty() {
+            url_from_input(&input).ok_or_else(|| {
+                BlockError::Other("http_request url required from forced input sources".into())
+            })?
+        } else if let Some(url) = self.config.url.clone() {
+            url
+        } else {
+            url_from_input(&input).ok_or_else(|| {
                 BlockError::Other("http_request url required from input or config".into())
-            })?,
+            })?
         };
         let timeout = Duration::from_millis(self.config.timeout_ms.unwrap_or(30_000));
         debug!(
@@ -200,6 +236,25 @@ impl BlockExecutor for HttpRequestBlock {
             }
         }
     }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Text, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        let accepted = ValueKindSet::singleton(ValueKind::String)
+            | ValueKindSet::singleton(ValueKind::Text)
+            | ValueKindSet::singleton(ValueKind::Json);
+        if !self.input_from.is_empty() {
+            validate_single_input_mode(ctx)?;
+            return validate_expected_input(ctx, accepted);
+        }
+        if self.config.url.is_some() {
+            return Ok(());
+        }
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(ctx, accepted)
+    }
 }
 
 fn classify_http_error(message: &str) -> (&'static str, bool, Option<String>) {
@@ -265,14 +320,25 @@ pub fn register_http_request(
     requester: Arc<dyn HttpRequester>,
 ) {
     let requester = Arc::clone(&requester);
-    registry.register_custom("http_request", move |payload| {
+    registry.register_custom("http_request", move |payload, input_from| {
         let config: HttpRequestConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(HttpRequestBlock::new(
-            config,
-            Arc::clone(&requester),
-        )))
+        Ok(Box::new(
+            HttpRequestBlock::new(config, Arc::clone(&requester)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -303,7 +369,7 @@ mod tests {
             Arc::new(MockRequester),
         );
         let out = block
-            .execute(BlockInput::String("https://ok.test".into()))
+            .execute(test_ctx(BlockInput::String("https://ok.test".into())))
             .unwrap();
         match out {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, "ok"),
@@ -317,8 +383,45 @@ mod tests {
             HttpRequestConfig::new(None::<String>),
             Arc::new(MockRequester),
         );
-        let err = block.execute(BlockInput::empty());
+        let err = block.execute(test_ctx(BlockInput::empty()));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("url required"));
+    }
+
+    #[test]
+    fn http_request_precedence_config_over_prev() {
+        let block = HttpRequestBlock::new(
+            HttpRequestConfig::new(Some("https://ok.test")),
+            Arc::new(MockRequester),
+        );
+        let out = block
+            .execute(test_ctx(BlockInput::String("https://bad.test".into())))
+            .unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, "ok"),
+            _ => panic!("expected Once(Text)"),
+        }
+    }
+
+    #[test]
+    fn http_request_precedence_forced_over_config() {
+        let source_id = uuid::Uuid::new_v4();
+        let ctx = test_ctx(BlockInput::empty());
+        ctx.store.insert(
+            source_id,
+            orchestrator_core::block::StoredOutput::Once(Arc::new(BlockOutput::String {
+                value: "https://ok.test".to_string(),
+            })),
+        );
+        let block = HttpRequestBlock::new(
+            HttpRequestConfig::new(Some("https://bad.test")),
+            Arc::new(MockRequester),
+        )
+        .with_input_from(vec![source_id].into_boxed_slice());
+        let out = block.execute(ctx).unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, "ok"),
+            _ => panic!("expected Once(Text)"),
+        }
     }
 }

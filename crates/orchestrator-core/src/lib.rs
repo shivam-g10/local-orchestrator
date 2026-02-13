@@ -6,4 +6,4 @@ pub mod workflow;
 
 pub use block::{BlockConfig, BlockOutput, BlockRegistry, RetryPolicy};
 pub use core::WorkflowDefinition;
-pub use workflow::{BlockId, RunError, Workflow, WorkflowEndpoint};
+pub use workflow::{BlockId, RunError, Workflow, WorkflowEndpoint, WorkflowValidationError};

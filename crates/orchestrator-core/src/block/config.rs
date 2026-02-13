@@ -15,6 +15,8 @@ pub enum BlockConfig {
         type_id: String,
         #[serde(rename = "payload")]
         payload: serde_json::Value,
+        #[serde(default)]
+        input_from: Box<[uuid::Uuid]>,
     },
 }
 
@@ -38,6 +40,7 @@ mod tests {
         let config = BlockConfig::Custom {
             type_id: "my_block".to_string(),
             payload: json!({"key": "value"}),
+            input_from: Box::new([]),
         };
         assert_eq!(config.block_type(), "my_block");
     }
@@ -47,13 +50,19 @@ mod tests {
         let config = BlockConfig::Custom {
             type_id: "my_block".to_string(),
             payload: json!({"key": "value"}),
+            input_from: Box::new([]),
         };
         let json = serde_json::to_string(&config).unwrap();
         let restored: BlockConfig = serde_json::from_str(&json).unwrap();
         match &restored {
-            BlockConfig::Custom { type_id, payload } => {
+            BlockConfig::Custom {
+                type_id,
+                payload,
+                input_from,
+            } => {
                 assert_eq!(type_id, "my_block");
                 assert_eq!(payload.get("key").and_then(|v| v.as_str()), Some("value"));
+                assert!(input_from.is_empty());
             }
             _ => panic!("expected Custom"),
         }

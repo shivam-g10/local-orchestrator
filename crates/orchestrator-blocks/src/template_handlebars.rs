@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::resolve_effective_input;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind,
 };
 
 /// Error from template rendering.
@@ -70,55 +72,82 @@ fn output_to_json(o: &BlockOutput) -> serde_json::Value {
 pub struct TemplateHandlebarsBlock {
     config: TemplateHandlebarsConfig,
     renderer: Arc<dyn TemplateRenderer>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl TemplateHandlebarsBlock {
     pub fn new(config: TemplateHandlebarsConfig, renderer: Arc<dyn TemplateRenderer>) -> Self {
-        Self { config, renderer }
+        Self {
+            config,
+            renderer,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
+    }
+}
+
+fn template_from_input(input: &BlockInput) -> Option<String> {
+    match input {
+        BlockInput::Json(v) if v.is_object() => v
+            .get("template")
+            .and_then(|tpl| tpl.as_str())
+            .map(String::from),
+        _ => None,
+    }
+}
+
+fn input_to_data(input: &BlockInput, strip_template_field: bool) -> serde_json::Value {
+    match input {
+        BlockInput::Json(v) => {
+            if strip_template_field {
+                if let Some(obj) = v.as_object() {
+                    let mut data_obj = obj.clone();
+                    data_obj.remove("template");
+                    serde_json::Value::Object(data_obj)
+                } else {
+                    v.clone()
+                }
+            } else {
+                v.clone()
+            }
+        }
+        BlockInput::String(s) => serde_json::Value::String(s.clone()),
+        BlockInput::Text(s) => serde_json::Value::String(s.clone()),
+        BlockInput::Empty => serde_json::Value::Null,
+        BlockInput::List { .. } => serde_json::Value::Null,
+        BlockInput::Multi { outputs } => outputs
+            .first()
+            .map(output_to_json)
+            .unwrap_or(serde_json::Value::Null),
+        BlockInput::Error { message } => serde_json::Value::String(message.clone()),
     }
 }
 
 impl BlockExecutor for TemplateHandlebarsBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        // When input is Json with key "template", use it as template string and rest as data.
-        let (template, data) = match &input {
-            BlockInput::Json(v) if v.is_object() => {
-                if let Some(tpl_val) = v.get("template") {
-                    if let Some(tpl_str) = tpl_val.as_str() {
-                        let mut data_obj = v.clone();
-                        if let Some(obj) = data_obj.as_object_mut() {
-                            obj.remove("template");
-                        }
-                        (tpl_str.to_string(), data_obj)
-                    } else {
-                        (
-                            self.config.template.as_deref().unwrap_or("").to_string(),
-                            v.clone(),
-                        )
-                    }
-                } else {
-                    (
-                        self.config.template.as_deref().unwrap_or("").to_string(),
-                        v.clone(),
-                    )
-                }
-            }
-            _ => (
-                self.config.template.as_deref().unwrap_or("").to_string(),
-                match &input {
-                    BlockInput::Json(v) => v.clone(),
-                    BlockInput::String(s) => serde_json::Value::String(s.clone()),
-                    BlockInput::Text(s) => serde_json::Value::String(s.clone()),
-                    BlockInput::Empty => serde_json::Value::Null,
-                    BlockInput::List { .. } => serde_json::Value::Null,
-                    BlockInput::Multi { outputs } => outputs
-                        .first()
-                        .map(output_to_json)
-                        .unwrap_or(serde_json::Value::Null),
-                    BlockInput::Error { message } => serde_json::Value::String(message.clone()),
-                },
-            ),
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
+        let forced_mode = !self.input_from.is_empty();
+        let configured_template = if forced_mode {
+            None
+        } else {
+            self.config.template.clone()
         };
+        let input_template = template_from_input(&input);
+        let has_input_template = input_template.is_some();
+        let template = if forced_mode {
+            input_template.unwrap_or_default()
+        } else if let Some(template) = configured_template {
+            template
+        } else {
+            input_template.clone().unwrap_or_default()
+        };
+        let strip_template_field =
+            has_input_template && (forced_mode || self.config.template.is_none());
+        let data = input_to_data(&input, strip_template_field);
 
         let needs_data = template_has_placeholders(&template);
         if needs_data && data.is_null() {
@@ -135,6 +164,10 @@ impl BlockExecutor for TemplateHandlebarsBlock {
                 .map_err(|e| BlockError::Other(e.0))?
         };
         Ok(BlockExecutionResult::Once(BlockOutput::Text { value: out }))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Text, OutputMode::Once)
     }
 }
 
@@ -169,14 +202,25 @@ pub fn register_template_handlebars(
     renderer: Arc<dyn TemplateRenderer>,
 ) {
     let renderer = Arc::clone(&renderer);
-    registry.register_custom("template_handlebars", move |payload| {
+    registry.register_custom("template_handlebars", move |payload, input_from| {
         let config: TemplateHandlebarsConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(TemplateHandlebarsBlock::new(
-            config,
-            Arc::clone(&renderer),
-        )))
+        Ok(Box::new(
+            TemplateHandlebarsBlock::new(config, Arc::clone(&renderer)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -195,12 +239,24 @@ mod tests {
         }
     }
 
+    struct EchoTemplateRenderer;
+    impl TemplateRenderer for EchoTemplateRenderer {
+        fn render(
+            &self,
+            template: &str,
+            data: &serde_json::Value,
+            _partials: Option<&serde_json::Value>,
+        ) -> Result<String, TemplateError> {
+            Ok(format!("template={template};data={data}"))
+        }
+    }
+
     #[test]
     fn template_handlebars_executes_with_json_input() {
         let config = TemplateHandlebarsConfig::new(None);
         let block = TemplateHandlebarsBlock::new(config, Arc::new(TestRenderer));
         let input = BlockInput::Json(serde_json::json!({"name": "world"}));
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
                 assert!(value.contains("world") || value.contains("name"));
@@ -213,7 +269,7 @@ mod tests {
     fn template_handlebars_empty_input_returns_null_string_when_no_placeholders() {
         let config = TemplateHandlebarsConfig::new(None);
         let block = TemplateHandlebarsBlock::new(config, Arc::new(TestRenderer));
-        let result = block.execute(BlockInput::empty()).unwrap();
+        let result = block.execute(test_ctx(BlockInput::empty())).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, "null"),
             _ => panic!("expected Once(Text)"),
@@ -224,7 +280,7 @@ mod tests {
     fn template_handlebars_with_placeholders_and_empty_input_returns_error() {
         let config = TemplateHandlebarsConfig::with_template("Hello {{name}}", None);
         let block = TemplateHandlebarsBlock::new(config, Arc::new(TestRenderer));
-        let err = block.execute(BlockInput::empty());
+        let err = block.execute(test_ctx(BlockInput::empty()));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("placeholders"));
     }
@@ -234,7 +290,7 @@ mod tests {
         let config = TemplateHandlebarsConfig::with_template("Hello {{name}}", None);
         let block = TemplateHandlebarsBlock::new(config, Arc::new(HandlebarsTemplateRenderer));
         let input = BlockInput::Json(serde_json::json!({"name": "world"}));
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
                 assert_eq!(value, "Hello world")
@@ -252,10 +308,58 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream error".into(),
         };
-        let out = block.execute(input).unwrap();
+        let out = block.execute(test_ctx(input)).unwrap();
         match out {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
                 assert!(value.contains("upstream error"));
+            }
+            _ => panic!("expected Once(Text)"),
+        }
+    }
+
+    #[test]
+    fn template_handlebars_precedence_config_over_prev_template() {
+        let block = TemplateHandlebarsBlock::new(
+            TemplateHandlebarsConfig::with_template("from-config", None),
+            Arc::new(EchoTemplateRenderer),
+        );
+        let out = block
+            .execute(test_ctx(BlockInput::Json(serde_json::json!({
+                "template": "from-prev",
+                "name": "x"
+            }))))
+            .unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert!(value.contains("template=from-config"));
+            }
+            _ => panic!("expected Once(Text)"),
+        }
+    }
+
+    #[test]
+    fn template_handlebars_precedence_forced_over_config() {
+        let source_id = uuid::Uuid::new_v4();
+        let ctx = test_ctx(BlockInput::empty());
+        ctx.store.insert(
+            source_id,
+            orchestrator_core::block::StoredOutput::Once(Arc::new(BlockOutput::Json {
+                value: serde_json::json!({
+                    "template": "from-forced",
+                    "name": "x"
+                }),
+            })),
+        );
+        let block = TemplateHandlebarsBlock::new(
+            TemplateHandlebarsConfig::with_template("from-config", None),
+            Arc::new(EchoTemplateRenderer),
+        )
+        .with_input_from(vec![source_id].into_boxed_slice());
+
+        let out = block.execute(ctx).unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert!(value.contains("template=from-forced"));
             }
             _ => panic!("expected Once(Text)"),
         }

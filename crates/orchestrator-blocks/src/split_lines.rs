@@ -5,8 +5,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 /// Error from split-lines operations.
@@ -69,16 +73,27 @@ impl SplitLinesConfig {
 pub struct SplitLinesBlock {
     config: SplitLinesConfig,
     strategy: Arc<dyn LineSplitStrategy>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl SplitLinesBlock {
     pub fn new(config: SplitLinesConfig, strategy: Arc<dyn LineSplitStrategy>) -> Self {
-        Self { config, strategy }
+        Self {
+            config,
+            strategy,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
 impl BlockExecutor for SplitLinesBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let text = match input {
             BlockInput::String(s) => s,
             BlockInput::Text(s) => s,
@@ -108,6 +123,21 @@ impl BlockExecutor for SplitLinesBlock {
             .map(|line| BlockOutput::String { value: line })
             .collect();
         Ok(BlockExecutionResult::Multiple(outputs))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::String, OutputMode::Multiple)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(
+            ctx,
+            ValueKindSet::singleton(ValueKind::Empty)
+                | ValueKindSet::singleton(ValueKind::String)
+                | ValueKindSet::singleton(ValueKind::Text)
+                | ValueKindSet::singleton(ValueKind::Json),
+        )
     }
 }
 
@@ -149,14 +179,25 @@ pub fn register_split_lines(
     strategy: Arc<dyn LineSplitStrategy>,
 ) {
     let strategy = Arc::clone(&strategy);
-    registry.register_custom("split_lines", move |payload| {
+    registry.register_custom("split_lines", move |payload, input_from| {
         let config: SplitLinesConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SplitLinesBlock::new(
-            config,
-            Arc::clone(&strategy),
-        )))
+        Ok(Box::new(
+            SplitLinesBlock::new(config, Arc::clone(&strategy)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -167,7 +208,7 @@ mod tests {
     fn split_lines_returns_multiple_outputs() {
         let block = SplitLinesBlock::new(SplitLinesConfig::default(), Arc::new(StdLineSplitter));
         let out = block
-            .execute(BlockInput::String("a\nb\nc\n".into()))
+            .execute(test_ctx(BlockInput::String("a\nb\nc\n".into())))
             .unwrap();
         match out {
             BlockExecutionResult::Multiple(outs) => {
@@ -183,9 +224,9 @@ mod tests {
     #[test]
     fn split_lines_error_input_returns_error() {
         let block = SplitLinesBlock::new(SplitLinesConfig::default(), Arc::new(StdLineSplitter));
-        let err = block.execute(BlockInput::Error {
+        let err = block.execute(test_ctx(BlockInput::Error {
             message: "upstream".into(),
-        });
+        }));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream"));
     }

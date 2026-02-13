@@ -72,6 +72,7 @@ mod tests {
         BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path }),
+            input_from: Box::new([]),
         }
     }
 

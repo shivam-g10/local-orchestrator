@@ -12,14 +12,15 @@ use lettre::{
 
 use orchestrator_blocks::SendEmail;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
 
 /// ReadPathsBlock: input = List of paths, reads all files, output = JSON { "contents": [ { "path", "content" } ] }.
 pub struct ReadPathsBlock;
 
 impl BlockExecutor for ReadPathsBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = ctx.prev;
         let paths: Vec<String> = match &input {
             BlockInput::List { items } => items.clone(),
             BlockInput::Json(v) => {
@@ -162,7 +163,8 @@ fn find_content(contents: &[(String, String)], path_ends: &str) -> Option<String
 pub struct ReportTransformBlock;
 
 impl BlockExecutor for ReportTransformBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = ctx.prev;
         let (daily_note, reports_json) = match &input {
             BlockInput::Json(v) => {
                 let daily_note = v
@@ -336,7 +338,8 @@ fn output_to_string(o: &BlockOutput) -> String {
 }
 
 impl BlockExecutor for NextDayNoteBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = ctx.prev;
         let summary = match &input {
             BlockInput::Multi { outputs } => outputs
                 .iter()
@@ -485,8 +488,7 @@ impl SendEmail for LettreMailer {
 pub struct TriggerOnceBlock;
 
 impl BlockExecutor for TriggerOnceBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        let _ = input;
+    fn execute(&self, _ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
         Ok(BlockExecutionResult::Once(BlockOutput::Empty))
     }
 }

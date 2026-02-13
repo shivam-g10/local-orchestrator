@@ -7,8 +7,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 pub use feed_rs_parser::FeedRsParser;
@@ -36,6 +40,7 @@ pub struct RssParseConfig {}
 pub struct RssParseBlock {
     _config: RssParseConfig,
     parser: Arc<dyn RssParser>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl RssParseBlock {
@@ -43,12 +48,19 @@ impl RssParseBlock {
         Self {
             _config: config,
             parser,
+            input_from: Box::new([]),
         }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
 impl BlockExecutor for RssParseBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let xml = match input {
             BlockInput::String(s) => s,
             BlockInput::Text(s) => s,
@@ -71,6 +83,20 @@ impl BlockExecutor for RssParseBlock {
             value: serde_json::Value::Array(items),
         }))
     }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Json, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(
+            ctx,
+            ValueKindSet::singleton(ValueKind::String)
+                | ValueKindSet::singleton(ValueKind::Text)
+                | ValueKindSet::singleton(ValueKind::Json),
+        )
+    }
 }
 
 /// Register the rss_parse block with a parser.
@@ -79,11 +105,25 @@ pub fn register_rss_parse(
     parser: Arc<dyn RssParser>,
 ) {
     let parser = Arc::clone(&parser);
-    registry.register_custom("rss_parse", move |payload| {
+    registry.register_custom("rss_parse", move |payload, input_from| {
         let config: RssParseConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(RssParseBlock::new(config, Arc::clone(&parser))))
+        Ok(Box::new(
+            RssParseBlock::new(config, Arc::clone(&parser)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +145,9 @@ mod tests {
 </channel>
 </rss>"#;
         let block = RssParseBlock::new(RssParseConfig::default(), Arc::new(FeedRsParser));
-        let out = block.execute(BlockInput::String(xml.to_string())).unwrap();
+        let out = block
+            .execute(test_ctx(BlockInput::String(xml.to_string())))
+            .unwrap();
         match out {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 let arr = value.as_array().unwrap();
@@ -124,7 +166,7 @@ mod tests {
     #[test]
     fn rss_parse_invalid_xml_returns_error() {
         let block = RssParseBlock::new(RssParseConfig::default(), Arc::new(FeedRsParser));
-        let err = block.execute(BlockInput::String("not xml".to_string()));
+        let err = block.execute(test_ctx(BlockInput::String("not xml".to_string())));
         assert!(err.is_err());
     }
 }

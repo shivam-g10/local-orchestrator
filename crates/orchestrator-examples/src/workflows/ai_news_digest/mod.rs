@@ -180,7 +180,7 @@ fn build_registry(deps: &RegistryDeps, sent_items_path: &Path, max_items: usize)
         register_rss_parse(&mut r, Arc::clone(parser));
     }
     let sent_path = sent_items_path.to_string_lossy().to_string();
-    r.register_custom("news_dedupe", move |_| {
+    r.register_custom("news_dedupe", move |_, _input_from| {
         Ok(Box::new(NewsDedupeBlock::new(NewsDedupeConfig {
             sent_items_path: sent_path.clone(),
             max_items,
@@ -212,35 +212,33 @@ fn build_log_child_definition(
         ))
     })?;
     let mut w = Workflow::with_registry(orchestrator_blocks::default_registry());
-    let render_id = w.add(Block::template_handlebars(Some(template), None));
-    let write_id = w.add(Block::file_write_append(Some(
-        out_path.to_string_lossy().as_ref(),
-    )));
-    w.link(render_id, write_id);
+    let render = Block::template_handlebars(Some(template), None);
+    let write = Block::file_write_append(Some(out_path.to_string_lossy().as_ref()));
+    w.link(&render, &write);
     Ok(w.into_definition())
 }
 
 fn add_audit_link(
     w: &mut Workflow,
-    from: orchestrator_core::BlockId,
+    from: &Block,
     template_path: &Path,
     out_path: &Path,
 ) -> Result<(), RunError> {
     let child = build_log_child_definition(template_path, out_path)?;
-    let child_id = w.add(Block::child_workflow(child));
-    w.link(from, child_id);
+    let child_block = Block::child_workflow(child);
+    w.link(from, child_block);
     Ok(())
 }
 
 fn add_error_link(
     w: &mut Workflow,
-    from: orchestrator_core::BlockId,
+    from: &Block,
     template_path: &Path,
     out_path: &Path,
 ) -> Result<(), RunError> {
     let child = build_log_child_definition(template_path, out_path)?;
-    let child_id = w.add(Block::child_workflow(child));
-    w.link_on_error(from, child_id);
+    let child_block = Block::child_workflow(child);
+    w.link_on_error(from, child_block);
     Ok(())
 }
 
@@ -293,191 +291,178 @@ fn run_with_deps(deps: RegistryDeps, cfg: RunWithDepsConfig<'_>) -> Result<(), R
     let registry = build_registry(&deps, &sent_items_path, cfg.max_items);
     let mut w = Workflow::with_registry(registry);
 
-    let trigger_id = if cfg.use_cron {
-        w.add(Block::cron(cfg.cron_expr))
+    let trigger = if cfg.use_cron {
+        Block::cron(cfg.cron_expr)
     } else {
-        w.add(Block::custom_transform(None::<String>))
+        Block::custom_transform(None::<String>)
     };
-    let read_feeds_id = w.add(Block::file_read_force_config(Some(
-        cfg.feeds_file.to_string_lossy().as_ref(),
-    )));
-    let split_id = w.add(Block::split_lines());
-    w.link(trigger_id, read_feeds_id);
-    w.link(read_feeds_id, split_id);
+    let read_feeds = Block::file_read_force_config(Some(cfg.feeds_file.to_string_lossy().as_ref()));
+    let split = Block::split_lines();
+    let combine_keys: Vec<String> = (0..urls.len()).map(|i| format!("feed_{}", i)).collect();
+    let merge = Block::combine(combine_keys);
+    w.link(&trigger, &read_feeds);
+    w.link(&read_feeds, &split);
 
-    let mut parsed_ids = Vec::new();
+    let mut _feed_blocks: Vec<(Box<Block>, Box<Block>)> = Vec::with_capacity(urls.len());
     for url in &urls {
-        let http_id = w.add(Block::http_request(Some(url.as_str())));
-        let parse_id = w.add(Block::rss_parse());
-        w.link(split_id, http_id);
-        w.link(http_id, parse_id);
-        parsed_ids.push(parse_id);
+        let http = Box::new(Block::http_request(Some(url.as_str())));
+        let parse = Box::new(Block::rss_parse());
+        w.link(&split, http.as_ref());
+        w.link(http.as_ref(), parse.as_ref());
+        w.link(parse.as_ref(), &merge);
 
         add_error_link(
             &mut w,
-            http_id,
+            http.as_ref(),
             &cfg.template_dir.join("error.hbs"),
             &cfg.logs_dir.join("errors.log"),
         )?;
         add_error_link(
             &mut w,
-            http_id,
+            http.as_ref(),
             &cfg.template_dir.join("run_error.hbs"),
             &runs_path,
         )?;
         add_error_link(
             &mut w,
-            parse_id,
+            parse.as_ref(),
             &cfg.template_dir.join("error.hbs"),
             &cfg.logs_dir.join("errors.log"),
         )?;
         add_error_link(
             &mut w,
-            parse_id,
+            parse.as_ref(),
             &cfg.template_dir.join("run_error.hbs"),
             &runs_path,
         )?;
-    }
-
-    let combine_keys: Vec<String> = (0..parsed_ids.len())
-        .map(|i| format!("feed_{}", i))
-        .collect();
-    let merge_id = w.add(Block::combine(combine_keys));
-    for id in &parsed_ids {
-        w.link(*id, merge_id);
+        _feed_blocks.push((http, parse));
     }
     add_audit_link(
         &mut w,
-        merge_id,
+        &merge,
         &cfg.template_dir.join("merged.hbs"),
         &cfg.logs_dir.join("merged.log"),
     )?;
 
-    let dedupe_id = w
-        .add_custom("news_dedupe", serde_json::json!({}))
-        .map_err(|e| run_error(e.to_string()))?;
-    w.link(merge_id, dedupe_id);
+    let dedupe = Block::custom("news_dedupe", serde_json::json!({}));
+    w.link(&merge, &dedupe);
     add_audit_link(
         &mut w,
-        dedupe_id,
+        &dedupe,
         &cfg.template_dir.join("dedupe.hbs"),
         &cfg.logs_dir.join("dedupe.log"),
     )?;
     add_error_link(
         &mut w,
-        dedupe_id,
+        &dedupe,
         &cfg.template_dir.join("run_skip.hbs"),
         &runs_path,
     )?;
     add_error_link(
         &mut w,
-        dedupe_id,
+        &dedupe,
         &cfg.template_dir.join("error.hbs"),
         &cfg.logs_dir.join("errors.log"),
     )?;
 
-    let ai_id = w.add(Block::ai_generate(
+    let ai = Block::ai_generate(
         prompt,
         Some("openai"),
         Some(cfg.model),
         Some(cfg.api_key_env.unwrap_or("OPENAI_API_KEY")),
-    ));
-    w.link(dedupe_id, ai_id);
+    );
+    w.link(&dedupe, &ai);
     add_audit_link(
         &mut w,
-        ai_id,
+        &ai,
         &cfg.template_dir.join("ai_markdown.hbs"),
         &cfg.logs_dir.join("ai_markdown.log"),
     )?;
     add_error_link(
         &mut w,
-        ai_id,
+        &ai,
         &cfg.template_dir.join("error.hbs"),
         &cfg.logs_dir.join("errors.log"),
     )?;
     add_error_link(
         &mut w,
-        ai_id,
+        &ai,
         &cfg.template_dir.join("run_error.hbs"),
         &runs_path,
     )?;
 
-    let markdown_id = w.add(Block::markdown_to_html());
-    w.link(ai_id, markdown_id);
+    let markdown = Block::markdown_to_html();
+    w.link(&ai, &markdown);
 
-    let read_email_template_id = w.add(Block::file_read_force_config(Some(
-        cfg.email_template_path.to_string_lossy().as_ref(),
-    )));
+    let read_email_template =
+        Block::file_read_force_config(Some(cfg.email_template_path.to_string_lossy().as_ref()));
     // Link from Json-producing block to avoid overriding file_read path from string input.
-    w.link(dedupe_id, read_email_template_id);
+    w.link(&dedupe, &read_email_template);
     add_error_link(
         &mut w,
-        read_email_template_id,
+        &read_email_template,
         &cfg.template_dir.join("error.hbs"),
         &cfg.logs_dir.join("errors.log"),
     )?;
 
-    let combine_email_id = w.add(Block::combine(vec![
-        "body".to_string(),
-        "template".to_string(),
-    ]));
-    w.link(markdown_id, combine_email_id);
-    w.link(read_email_template_id, combine_email_id);
+    let combine_email = Block::combine(vec!["body".to_string(), "template".to_string()]);
+    w.link(&markdown, &combine_email);
+    w.link(&read_email_template, &combine_email);
 
-    let render_email_id = w.add(Block::template_handlebars(None::<String>, None));
-    w.link(combine_email_id, render_email_id);
+    let render_email = Block::template_handlebars(None::<String>, None);
+    w.link(&combine_email, &render_email);
     add_audit_link(
         &mut w,
-        render_email_id,
+        &render_email,
         &cfg.template_dir.join("email_html.hbs"),
         &cfg.logs_dir.join("email_html.log"),
     )?;
     add_error_link(
         &mut w,
-        render_email_id,
+        &render_email,
         &cfg.template_dir.join("error.hbs"),
         &cfg.logs_dir.join("errors.log"),
     )?;
 
-    let send_id = w.add(Block::send_email(cfg.to_email, Some(cfg.subject)));
-    w.link(render_email_id, send_id);
+    let send = Block::send_email(cfg.to_email, Some(cfg.subject));
+    w.link(&render_email, &send);
     add_audit_link(
         &mut w,
-        send_id,
+        &send,
         &cfg.template_dir.join("send.hbs"),
         &cfg.logs_dir.join("send.log"),
     )?;
     add_error_link(
         &mut w,
-        send_id,
+        &send,
         &cfg.template_dir.join("error.hbs"),
         &cfg.logs_dir.join("errors.log"),
     )?;
     add_error_link(
         &mut w,
-        send_id,
+        &send,
         &cfg.template_dir.join("run_error.hbs"),
         &runs_path,
     )?;
 
-    let combine_post_send_id = w.add(Block::combine(vec![
+    let combine_post_send = Block::combine(vec![
         "dedupe".to_string(),
         "send".to_string(),
         "run_ts".to_string(),
-    ]));
-    w.link(dedupe_id, combine_post_send_id);
-    w.link(send_id, combine_post_send_id);
-    w.link(trigger_id, combine_post_send_id);
+    ]);
+    w.link(&dedupe, &combine_post_send);
+    w.link(&send, &combine_post_send);
+    w.link(&trigger, &combine_post_send);
 
     add_audit_link(
         &mut w,
-        combine_post_send_id,
+        &combine_post_send,
         &cfg.template_dir.join("sent_items.hbs"),
         &sent_items_path,
     )?;
     add_audit_link(
         &mut w,
-        combine_post_send_id,
+        &combine_post_send,
         &cfg.template_dir.join("run_success.hbs"),
         &runs_path,
     )?;

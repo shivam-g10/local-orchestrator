@@ -3,8 +3,11 @@ use std::collections::HashMap;
 use super::{BlockConfig, BlockError, BlockExecutor};
 
 /// Factory that builds a block instance from serialized config (custom blocks).
-pub type CustomBlockFactory =
-    Box<dyn Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError> + Send + Sync>;
+pub type CustomBlockFactory = Box<
+    dyn Fn(serde_json::Value, Box<[uuid::Uuid]>) -> Result<Box<dyn BlockExecutor>, BlockError>
+        + Send
+        + Sync,
+>;
 
 /// Registry: type_id -> factory. ChildWorkflow is handled by the runtime, not the registry.
 #[derive(Default)]
@@ -23,7 +26,10 @@ impl BlockRegistry {
     pub fn register_custom(
         &mut self,
         type_id: impl Into<String>,
-        factory: impl Fn(serde_json::Value) -> Result<Box<dyn BlockExecutor>, BlockError>
+        factory: impl Fn(
+            serde_json::Value,
+            Box<[uuid::Uuid]>,
+        ) -> Result<Box<dyn BlockExecutor>, BlockError>
         + Send
         + Sync
         + 'static,
@@ -38,11 +44,15 @@ impl BlockRegistry {
             BlockConfig::ChildWorkflow(_) => Err(BlockError::Other(
                 "child_workflow is runtime-handled; do not call registry.get for it".into(),
             )),
-            BlockConfig::Custom { type_id, payload } => self
+            BlockConfig::Custom {
+                type_id,
+                payload,
+                input_from,
+            } => self
                 .custom_factories
                 .get(type_id.as_str())
                 .ok_or_else(|| BlockError::Other(format!("unknown custom block type: {}", type_id)))
-                .and_then(|f| f(payload.clone())),
+                .and_then(|f| f(payload.clone(), input_from.clone())),
         }
     }
 }
@@ -50,8 +60,10 @@ impl BlockRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{BlockExecutor, BlockInput, BlockOutput};
+    use crate::block::{BlockExecutionContext, BlockExecutor, BlockInput, BlockOutput};
+    use dashmap::DashMap;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn empty_registry_returns_error() {
@@ -59,6 +71,7 @@ mod tests {
         let config = BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({"path": "/tmp/x"}),
+            input_from: Box::new([]),
         };
         let err = r.get(&config);
         assert!(err.is_err());
@@ -67,7 +80,7 @@ mod tests {
     #[test]
     fn register_custom_resolves_and_executes() {
         let mut r = BlockRegistry::new();
-        r.register_custom("uppercase", |payload| {
+        r.register_custom("uppercase", |payload, _input_from| {
             let prefix: String = payload
                 .get("prefix")
                 .and_then(|v| v.as_str())
@@ -79,9 +92,17 @@ mod tests {
         let config = BlockConfig::Custom {
             type_id: "uppercase".to_string(),
             payload: json!({"prefix": "out:"}),
+            input_from: Box::new([]),
         };
         let block = r.get(&config).unwrap();
-        let out = block.execute(BlockInput::String("hello".into()));
+        let out = block.execute(BlockExecutionContext {
+            workflow_id: uuid::Uuid::new_v4(),
+            run_id: uuid::Uuid::new_v4(),
+            block_id: uuid::Uuid::new_v4(),
+            attempt: 1,
+            prev: BlockInput::String("hello".into()),
+            store: Arc::new(DashMap::new()),
+        });
         assert!(out.is_ok());
         let s: Option<String> = out.unwrap().into_once().into();
         assert_eq!(s, Some("out:HELLO".to_string()));
@@ -93,9 +114,9 @@ mod tests {
     impl BlockExecutor for UpperBlock {
         fn execute(
             &self,
-            input: BlockInput,
+            ctx: crate::block::BlockExecutionContext,
         ) -> Result<crate::block::BlockExecutionResult, BlockError> {
-            let s = match &input {
+            let s = match &ctx.prev {
                 BlockInput::String(t) => t.to_uppercase(),
                 BlockInput::Text(t) => t.to_uppercase(),
                 BlockInput::Empty => String::new(),

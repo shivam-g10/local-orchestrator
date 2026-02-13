@@ -28,10 +28,14 @@ pub(super) fn generate_markdown(
         .map_err(|e| AiGenerateError(e.to_string()))?;
 
     let payload_json = serde_json::to_string(input).map_err(|e| AiGenerateError(e.to_string()))?;
+    let prompt = config.prompt.as_deref().unwrap_or("").trim();
+    if prompt.is_empty() {
+        return Err(AiGenerateError("ai_generate prompt is required".into()));
+    }
     let body = serde_json::json!({
         "model": config.model,
         "input": [
-            { "role": "system", "content": config.prompt },
+            { "role": "system", "content": prompt },
             { "role": "user", "content": payload_json }
         ],
         "store": false

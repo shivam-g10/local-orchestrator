@@ -5,8 +5,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 /// Error from list-select operations.
@@ -74,16 +78,27 @@ fn input_to_items(input: &BlockInput) -> Result<Vec<String>, BlockError> {
 pub struct SelectFirstBlock {
     config: SelectFirstConfig,
     selector: Arc<dyn ListSelector>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl SelectFirstBlock {
     pub fn new(config: SelectFirstConfig, selector: Arc<dyn ListSelector>) -> Self {
-        Self { config, selector }
+        Self {
+            config,
+            selector,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
 impl BlockExecutor for SelectFirstBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let items = input_to_items(&input)?;
         let selected = self
             .selector
@@ -92,6 +107,22 @@ impl BlockExecutor for SelectFirstBlock {
         Ok(BlockExecutionResult::Once(BlockOutput::String {
             value: selected,
         }))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::String, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(
+            ctx,
+            ValueKindSet::singleton(ValueKind::Empty)
+                | ValueKindSet::singleton(ValueKind::String)
+                | ValueKindSet::singleton(ValueKind::Text)
+                | ValueKindSet::singleton(ValueKind::Json)
+                | ValueKindSet::singleton(ValueKind::List),
+        )
     }
 }
 
@@ -126,14 +157,25 @@ pub fn register_select_first(
     selector: Arc<dyn ListSelector>,
 ) {
     let selector = Arc::clone(&selector);
-    registry.register_custom("select_first", move |payload| {
+    registry.register_custom("select_first", move |payload, input_from| {
         let config: SelectFirstConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SelectFirstBlock::new(
-            config,
-            Arc::clone(&selector),
-        )))
+        Ok(Box::new(
+            SelectFirstBlock::new(config, Arc::clone(&selector)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +189,7 @@ mod tests {
         let input = BlockInput::List {
             items: vec!["a".into(), "b".into(), "c".into()],
         };
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::String { value }) => assert_eq!(value, "a"),
             _ => panic!("expected Once(String)"),
@@ -161,7 +203,7 @@ mod tests {
         let input = BlockInput::List {
             items: vec!["a".into(), "b".into(), "c".into()],
         };
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::String { value }) => assert_eq!(value, "c"),
             _ => panic!("expected Once(String)"),
@@ -173,7 +215,7 @@ mod tests {
         let config = SelectFirstConfig::new(None::<String>);
         let block = SelectFirstBlock::new(config, Arc::new(StdListSelector));
         let input = BlockInput::List { items: vec![] };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("empty"));
     }
@@ -185,7 +227,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream"));
     }

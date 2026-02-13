@@ -12,8 +12,6 @@
 //!   with a single [`BlockOutput`].
 //! - **Control** blocks may return `Multiple` for blocks like SplitByKeys that fan out.
 //!
-//! Custom block authors must implement the correct return shape for their block type.
-//!
 //! ## On-error
 //!
 //! When a block returns `Err`, the runtime may route that error to an error-handler node via
@@ -24,7 +22,12 @@
 //! Block authors should validate input and config and return `BlockError` when execution cannot
 //! succeed, so that workflows fail fast and blocks are used correctly.
 
+use std::ops::{BitOr, BitOrAssign};
+use std::sync::Arc;
+
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Block input: typed payload for block execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +52,17 @@ pub enum BlockInput {
 impl BlockInput {
     pub fn empty() -> Self {
         BlockInput::Empty
+    }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            BlockInput::Empty => ValueKind::Empty,
+            BlockInput::String(_) => ValueKind::String,
+            BlockInput::Text(_) => ValueKind::Text,
+            BlockInput::Json(_) => ValueKind::Json,
+            BlockInput::List { .. } | BlockInput::Multi { .. } => ValueKind::List,
+            BlockInput::Error { .. } => ValueKind::Text,
+        }
     }
 }
 
@@ -109,6 +123,16 @@ impl BlockOutput {
     pub fn empty() -> Self {
         BlockOutput::Empty
     }
+
+    pub fn value_kind(&self) -> ValueKind {
+        match self {
+            BlockOutput::Empty => ValueKind::Empty,
+            BlockOutput::String { .. } => ValueKind::String,
+            BlockOutput::Text { .. } => ValueKind::Text,
+            BlockOutput::Json { .. } => ValueKind::Json,
+            BlockOutput::List { .. } => ValueKind::List,
+        }
+    }
 }
 
 impl From<Option<String>> for BlockOutput {
@@ -134,6 +158,159 @@ impl From<BlockOutput> for Option<String> {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueKind {
+    Empty = 0,
+    String = 1,
+    Text = 2,
+    Json = 3,
+    List = 4,
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValueKindSet(u8);
+
+impl ValueKindSet {
+    const EMPTY_BIT: u8 = 1 << 0;
+    const STRING_BIT: u8 = 1 << 1;
+    const TEXT_BIT: u8 = 1 << 2;
+    const JSON_BIT: u8 = 1 << 3;
+    const LIST_BIT: u8 = 1 << 4;
+
+    pub const EMPTY: Self = Self(0);
+    pub const ANY: Self =
+        Self(Self::EMPTY_BIT | Self::STRING_BIT | Self::TEXT_BIT | Self::JSON_BIT | Self::LIST_BIT);
+
+    pub const fn singleton(kind: ValueKind) -> Self {
+        match kind {
+            ValueKind::Empty => Self(Self::EMPTY_BIT),
+            ValueKind::String => Self(Self::STRING_BIT),
+            ValueKind::Text => Self(Self::TEXT_BIT),
+            ValueKind::Json => Self(Self::JSON_BIT),
+            ValueKind::List => Self(Self::LIST_BIT),
+        }
+    }
+
+    pub const fn intersects(self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+
+    pub const fn contains(self, kind: ValueKind) -> bool {
+        self.intersects(Self::singleton(kind))
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl BitOr for ValueKindSet {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl BitOrAssign for ValueKindSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputMode {
+    Once,
+    Multiple,
+    Recurring,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputContract {
+    pub kinds: ValueKindSet,
+    pub mode: OutputMode,
+}
+
+impl OutputContract {
+    pub const fn any_once() -> Self {
+        Self {
+            kinds: ValueKindSet::ANY,
+            mode: OutputMode::Once,
+        }
+    }
+
+    pub const fn from_kind(kind: ValueKind, mode: OutputMode) -> Self {
+        Self {
+            kinds: ValueKindSet::singleton(kind),
+            mode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputContract {
+    Empty,
+    One(ValueKindSet),
+    Multi(Box<[ValueKindSet]>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidateContext<'a> {
+    pub block_id: Uuid,
+    pub prev: InputContract,
+    pub forced_refs: &'a [OutputContract],
+}
+
+/// Output values stored in run context.
+#[derive(Debug, Clone)]
+pub enum StoredOutput {
+    Once(Arc<BlockOutput>),
+    Multiple(Arc<[BlockOutput]>),
+}
+
+impl StoredOutput {
+    pub fn outputs(&self) -> Vec<BlockOutput> {
+        match self {
+            StoredOutput::Once(output) => vec![(*output.as_ref()).clone()],
+            StoredOutput::Multiple(outputs) => outputs.as_ref().to_vec(),
+        }
+    }
+
+    pub fn as_contract(&self) -> OutputContract {
+        match self {
+            StoredOutput::Once(output) => {
+                OutputContract::from_kind(output.value_kind(), OutputMode::Once)
+            }
+            StoredOutput::Multiple(outputs) => {
+                let mut kinds = ValueKindSet::EMPTY;
+                for output in outputs.iter() {
+                    kinds = ValueKindSet(kinds.0 | ValueKindSet::singleton(output.value_kind()).0);
+                }
+                OutputContract {
+                    kinds,
+                    mode: OutputMode::Multiple,
+                }
+            }
+        }
+    }
+}
+
+/// Run-scoped shared output store.
+pub type SharedRunStore = Arc<DashMap<Uuid, StoredOutput>>;
+
+/// Runtime context provided to every block execution.
+#[derive(Clone)]
+pub struct BlockExecutionContext {
+    pub workflow_id: Uuid,
+    pub run_id: Uuid,
+    pub block_id: Uuid,
+    pub attempt: u32,
+    pub prev: BlockInput,
+    pub store: SharedRunStore,
+}
+
 /// Block execution error.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BlockError {
@@ -143,6 +320,14 @@ pub enum BlockError {
     FileNotFound(String),
     #[error("io error: {0}")]
     Io(String),
+    #[error("block input missing from source {source_id}: {message}")]
+    InputMissing { source_id: Uuid, message: String },
+    #[error("block input type mismatch from source {source_id}: expected {expected}, got {actual}")]
+    InputTypeMismatch {
+        source_id: Uuid,
+        expected: String,
+        actual: String,
+    },
 }
 
 /// Result of block execution: single output, recurring stream, or multiple ordered outputs.
@@ -163,9 +348,54 @@ impl BlockExecutionResult {
     }
 }
 
+pub fn input_contract_from_predecessors(preds: &[OutputContract]) -> InputContract {
+    match preds {
+        [] => InputContract::Empty,
+        [only] => InputContract::One(only.kinds),
+        many => InputContract::Multi(many.iter().map(|c| c.kinds).collect()),
+    }
+}
+
+pub fn resolve_forced_input(
+    forced_refs: &[Uuid],
+    store: &SharedRunStore,
+) -> Result<BlockInput, BlockError> {
+    if forced_refs.is_empty() {
+        return Ok(BlockInput::Empty);
+    }
+    let mut ordered = Vec::new();
+    for source_id in forced_refs {
+        let item = store
+            .get(source_id)
+            .ok_or_else(|| BlockError::InputMissing {
+                source_id: *source_id,
+                message: "source output not found in run store".into(),
+            })?;
+        ordered.extend(item.outputs());
+    }
+    if ordered.is_empty() {
+        return Err(BlockError::InputMissing {
+            source_id: forced_refs[0],
+            message: "source output empty".into(),
+        });
+    }
+    if ordered.len() == 1 {
+        return Ok(BlockInput::from(ordered.remove(0)));
+    }
+    Ok(BlockInput::Multi { outputs: ordered })
+}
+
 /// Sync block executor trait.
 pub trait BlockExecutor: Send + Sync {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError>;
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError>;
+
+    fn validate_linkage(&self, _ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        Ok(())
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::any_once()
+    }
 }
 
 #[cfg(test)]

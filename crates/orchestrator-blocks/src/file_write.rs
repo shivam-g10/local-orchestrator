@@ -6,8 +6,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 /// Error from file write operations.
@@ -56,44 +60,97 @@ impl FileWriteConfig {
 pub struct FileWriteBlock {
     config: FileWriteConfig,
     writer: Arc<dyn FileWriter>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl FileWriteBlock {
     pub fn new(config: FileWriteConfig, writer: Arc<dyn FileWriter>) -> Self {
-        Self { config, writer }
+        Self {
+            config,
+            writer,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
+    }
+}
+
+fn json_to_content(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn content_and_path_from_input(
+    input: &BlockInput,
+) -> Result<(String, Option<std::path::PathBuf>), BlockError> {
+    match input {
+        BlockInput::String(s) => Ok((s.clone(), None)),
+        BlockInput::Text(s) => Ok((s.clone(), None)),
+        BlockInput::Json(v) => {
+            if let Some(obj) = v.as_object() {
+                let path = obj
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .map(std::path::PathBuf::from);
+                let content = obj
+                    .get("content")
+                    .map(json_to_content)
+                    .unwrap_or_else(|| v.to_string());
+                Ok((content, path))
+            } else {
+                Ok((json_to_content(v), None))
+            }
+        }
+        BlockInput::List { .. } => Err(BlockError::Other(
+            "file_write expects single string content".into(),
+        )),
+        BlockInput::Empty | BlockInput::Multi { .. } => Err(BlockError::Other(
+            "content required from upstream (e.g. file_read)".into(),
+        )),
+        BlockInput::Error { message } => Err(BlockError::Other(message.clone())),
     }
 }
 
 impl BlockExecutor for FileWriteBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        let content = match &input {
-            BlockInput::String(s) => s.clone(),
-            BlockInput::Text(s) => s.clone(),
-            BlockInput::Json(v) => v
-                .as_str()
-                .map(String::from)
-                .unwrap_or_else(|| v.to_string()),
-            BlockInput::List { .. } => {
-                return Err(BlockError::Other(
-                    "file_write expects single string content".into(),
-                ));
-            }
-            BlockInput::Empty | BlockInput::Multi { .. } => {
-                return Err(BlockError::Other(
-                    "content required from upstream (e.g. file_read)".into(),
-                ));
-            }
-            BlockInput::Error { message } => return Err(BlockError::Other(message.clone())),
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
+        let (content, input_path) = content_and_path_from_input(&input)?;
+        let path = if !self.input_from.is_empty() {
+            input_path.ok_or_else(|| {
+                BlockError::Other("destination path required from forced input sources".into())
+            })?
+        } else if let Some(path) = self.config.path_buf() {
+            path
+        } else {
+            input_path.ok_or_else(|| {
+                BlockError::Other("destination path required from input or block config".into())
+            })?
         };
-        let path = self.config.path_buf().ok_or_else(|| {
-            BlockError::Other("destination path required from block config".into())
-        })?;
 
         self.writer
             .write(&path, &content, self.config.append)
             .map_err(|e| BlockError::Other(e.0))?;
 
         Ok(BlockExecutionResult::Once(BlockOutput::empty()))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Empty, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(
+            ctx,
+            ValueKindSet::singleton(ValueKind::String)
+                | ValueKindSet::singleton(ValueKind::Text)
+                | ValueKindSet::singleton(ValueKind::Json),
+        )
     }
 }
 
@@ -128,11 +185,25 @@ pub fn register_file_write(
     writer: Arc<dyn FileWriter>,
 ) {
     let writer = Arc::clone(&writer);
-    registry.register_custom("file_write", move |payload| {
+    registry.register_custom("file_write", move |payload, input_from| {
         let config: FileWriteConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(FileWriteBlock::new(config, Arc::clone(&writer))))
+        Ok(Box::new(
+            FileWriteBlock::new(config, Arc::clone(&writer)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -149,7 +220,7 @@ mod tests {
             Arc::new(StdFileWriter),
         );
         block
-            .execute(BlockInput::String("written by test".into()))
+            .execute(test_ctx(BlockInput::String("written by test".into())))
             .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "written by test");
@@ -164,7 +235,9 @@ mod tests {
             FileWriteConfig::new(Some(path_str)),
             Arc::new(StdFileWriter),
         );
-        block.execute(BlockInput::String("nested".into())).unwrap();
+        block
+            .execute(test_ctx(BlockInput::String("nested".into())))
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested");
     }
 
@@ -177,7 +250,7 @@ mod tests {
             FileWriteConfig::new(Some(path_str)),
             Arc::new(StdFileWriter),
         );
-        let err = block.execute(BlockInput::empty());
+        let err = block.execute(test_ctx(BlockInput::empty()));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("content required"));
     }
@@ -188,7 +261,7 @@ mod tests {
             FileWriteConfig::new(None::<String>),
             Arc::new(StdFileWriter),
         );
-        let err = block.execute(BlockInput::String("x".into()));
+        let err = block.execute(test_ctx(BlockInput::String("x".into())));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("path required"));
     }
@@ -204,7 +277,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
     }
@@ -219,7 +292,68 @@ mod tests {
             FileWriteConfig::new(Some(path_str)).with_append(true),
             Arc::new(StdFileWriter),
         );
-        block.execute(BlockInput::String("b".into())).unwrap();
+        block
+            .execute(test_ctx(BlockInput::String("b".into())))
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ab");
+    }
+
+    #[test]
+    fn file_write_precedence_config_over_prev_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured_path = dir.path().join("configured.txt");
+        let input_path = dir.path().join("from_input.txt");
+        let block = FileWriteBlock::new(
+            FileWriteConfig::new(Some(configured_path.to_string_lossy().to_string())),
+            Arc::new(StdFileWriter),
+        );
+        block
+            .execute(test_ctx(BlockInput::Json(serde_json::json!({
+                "path": input_path.to_string_lossy().to_string(),
+                "content": "from-input"
+            }))))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&configured_path).unwrap(),
+            "from-input"
+        );
+        assert!(
+            !input_path.exists(),
+            "input path should be ignored when config path is set"
+        );
+    }
+
+    #[test]
+    fn file_write_precedence_forced_over_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured_path = dir.path().join("configured.txt");
+        let forced_path = dir.path().join("forced.txt");
+        let source_id = uuid::Uuid::new_v4();
+        let ctx = test_ctx(BlockInput::empty());
+        ctx.store.insert(
+            source_id,
+            orchestrator_core::block::StoredOutput::Once(Arc::new(BlockOutput::Json {
+                value: serde_json::json!({
+                    "path": forced_path.to_string_lossy().to_string(),
+                    "content": "from-forced"
+                }),
+            })),
+        );
+
+        let block = FileWriteBlock::new(
+            FileWriteConfig::new(Some(configured_path.to_string_lossy().to_string())),
+            Arc::new(StdFileWriter),
+        )
+        .with_input_from(vec![source_id].into_boxed_slice());
+
+        block.execute(ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&forced_path).unwrap(),
+            "from-forced"
+        );
+        assert!(
+            !configured_path.exists(),
+            "config path should be ignored when forced input is set"
+        );
     }
 }

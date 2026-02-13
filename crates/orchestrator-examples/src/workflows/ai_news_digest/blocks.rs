@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,8 @@ impl NewsDedupeBlock {
 }
 
 impl BlockExecutor for NewsDedupeBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = ctx.prev;
         let value = match input {
             BlockInput::Json(v) => v,
             BlockInput::String(s) => {
@@ -173,6 +174,17 @@ fn load_sent_ids(path: &Path) -> Result<HashSet<String>, BlockError> {
 mod tests {
     use super::*;
 
+    fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+        BlockExecutionContext {
+            workflow_id: Default::default(),
+            run_id: Default::default(),
+            block_id: Default::default(),
+            attempt: 1,
+            prev: input,
+            store: Default::default(),
+        }
+    }
+
     #[test]
     fn news_dedupe_filters_existing_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -189,7 +201,7 @@ mod tests {
                 {"url":"https://example.com/a", "title":"A dup"}
             ]
         });
-        let out = block.execute(BlockInput::Json(input)).unwrap();
+        let out = block.execute(test_ctx(BlockInput::Json(input))).unwrap();
         match out {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("new_count").and_then(|v| v.as_u64()), Some(1));

@@ -41,12 +41,15 @@ impl WorkflowEndpoint for &BlockConfig {
 
 /// Public run failure type (internal runtime error).
 pub type RunError = runtime::RuntimeError;
+/// Public validation failure type.
+pub type WorkflowValidationError = runtime::WorkflowValidationError;
 
 /// Workflow: add blocks, link them, then run. First block added is the entry block.
 pub struct Workflow {
     def_id: Uuid,
     nodes: HashMap<Uuid, BlockConfig>,
     ref_index: HashMap<usize, BlockId>,
+    node_input_sources: HashMap<Uuid, Vec<usize>>,
     edges: Vec<(Uuid, Uuid)>,
     error_edges: Vec<(Uuid, Uuid)>,
     entry: Option<Uuid>,
@@ -60,6 +63,7 @@ impl Workflow {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
             ref_index: HashMap::new(),
+            node_input_sources: HashMap::new(),
             edges: Vec::new(),
             error_edges: Vec::new(),
             entry: None,
@@ -73,6 +77,7 @@ impl Workflow {
             def_id: Uuid::new_v4(),
             nodes: HashMap::new(),
             ref_index: HashMap::new(),
+            node_input_sources: HashMap::new(),
             edges: Vec::new(),
             error_edges: Vec::new(),
             entry: None,
@@ -88,6 +93,7 @@ impl Workflow {
             self.entry = Some(id);
         }
         self.nodes.insert(id, config.into());
+        self.node_input_sources.entry(id).or_default();
         BlockId(id)
     }
 
@@ -100,6 +106,31 @@ impl Workflow {
         }
         let id = self.add(config);
         self.ref_index.insert(ref_key, id);
+        id
+    }
+
+    /// Add (or reuse) a block by reference and record source references declared by `with_input_from`.
+    pub fn add_ref_with_input_sources(
+        &mut self,
+        ref_key: usize,
+        config: impl Into<BlockConfig>,
+        source_ref_keys: &[usize],
+    ) -> BlockId {
+        let id = self.add_ref(ref_key, config);
+        self.node_input_sources
+            .insert(id.0, source_ref_keys.to_vec());
+        id
+    }
+
+    /// Add a one-shot block value and record source references declared by `with_input_from`.
+    pub fn add_with_input_sources(
+        &mut self,
+        config: impl Into<BlockConfig>,
+        source_ref_keys: &[usize],
+    ) -> BlockId {
+        let id = self.add(config);
+        self.node_input_sources
+            .insert(id.0, source_ref_keys.to_vec());
         id
     }
 
@@ -130,8 +161,10 @@ impl Workflow {
             BlockConfig::Custom {
                 type_id: type_id.to_string(),
                 payload,
+                input_from: Box::new([]),
             },
         );
+        self.node_input_sources.entry(id).or_default();
         Ok(BlockId(id))
     }
 
@@ -170,21 +203,45 @@ impl Workflow {
     /// Run the workflow (sync). Blocks until complete. Returns the sink block's output or [`RunError`].
     pub fn run(&self) -> Result<BlockOutput, RunError> {
         crate::observability::init_observability();
+        self.validate()?;
         let def = self.build_definition();
         let mut run = WorkflowRun::new(&def);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        rt.block_on(runtime::run_workflow(&def, &mut run, &self.registry, None))
+        rt.block_on(runtime::run_workflow(
+            &def,
+            &mut run,
+            &self.registry,
+            None,
+            None,
+        ))
     }
 
     /// Run the workflow (async). Returns the sink block's output or [`RunError`]. Call with `.await`.
     pub async fn run_async(&self) -> Result<BlockOutput, RunError> {
         crate::observability::init_observability();
+        self.validate()?;
         let def = self.build_definition();
         let mut run = WorkflowRun::new(&def);
-        runtime::run_workflow(&def, &mut run, &self.registry, None).await
+        runtime::run_workflow(&def, &mut run, &self.registry, None, None).await
+    }
+
+    /// Validate workflow graph and block I/O contracts without executing the workflow.
+    pub fn validate(&self) -> Result<(), WorkflowValidationError> {
+        let def = self.build_definition();
+        for (node_id, ref_keys) in &self.node_input_sources {
+            for ref_key in ref_keys {
+                if !self.ref_index.contains_key(ref_key) {
+                    return Err(WorkflowValidationError::MissingInputSource {
+                        block_id: *node_id,
+                        source_ref_key: *ref_key,
+                    });
+                }
+            }
+        }
+        runtime::validate_workflow(&def, &self.registry)
     }
 
     /// Consume this workflow and return a [`WorkflowDefinition`] suitable for use as a child workflow
@@ -192,10 +249,24 @@ impl Workflow {
     /// An empty workflow (no blocks) yields a valid definition but one that will fail at run time (no entry node).
     /// The same registry used to run the parent is used when the child is executed.
     pub fn into_definition(self) -> WorkflowDefinition {
+        let ref_index = self.ref_index;
+        let node_input_sources = self.node_input_sources;
         let nodes: HashMap<Uuid, NodeDef> = self
             .nodes
             .into_iter()
-            .map(|(id, config)| (id, NodeDef { config }))
+            .map(|(id, config)| {
+                let input_from = node_input_sources
+                    .get(&id)
+                    .map(|keys| {
+                        keys.iter()
+                            .filter_map(|k| ref_index.get(k).map(|b| b.0))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice()
+                    })
+                    .unwrap_or_else(|| Box::new([]));
+                let config = with_resolved_input_from(config, input_from);
+                (id, NodeDef { config })
+            })
             .collect();
         WorkflowDefinition {
             id: self.def_id,
@@ -211,10 +282,20 @@ impl Workflow {
             .nodes
             .iter()
             .map(|(id, config)| {
+                let input_from = self
+                    .node_input_sources
+                    .get(id)
+                    .map(|keys| {
+                        keys.iter()
+                            .filter_map(|k| self.ref_index.get(k).map(|b| b.0))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice()
+                    })
+                    .unwrap_or_else(|| Box::new([]));
                 (
                     *id,
                     NodeDef {
-                        config: config.clone(),
+                        config: with_resolved_input_from(config.clone(), input_from),
                     },
                 )
             })
@@ -226,6 +307,19 @@ impl Workflow {
             error_edges: self.error_edges.clone(),
             entry: self.entry,
         }
+    }
+}
+
+fn with_resolved_input_from(config: BlockConfig, input_from: Box<[Uuid]>) -> BlockConfig {
+    match config {
+        BlockConfig::Custom {
+            type_id, payload, ..
+        } => BlockConfig::Custom {
+            type_id,
+            payload,
+            input_from,
+        },
+        other => other,
     }
 }
 
@@ -252,14 +346,17 @@ impl From<Workflow> for WorkflowDefinition {
 mod tests {
     use super::*;
     use crate::block::RetryPolicy;
-    use crate::block::{BlockExecutor, BlockInput, BlockOutput};
+    use crate::block::{
+        BlockError, BlockExecutionContext, BlockExecutor, BlockInput, BlockOutput, InputContract,
+        OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
+    };
     use serde::Serialize;
     use serde_json::json;
     use std::path::PathBuf;
 
     fn file_read_registry() -> BlockRegistry {
         let mut r = BlockRegistry::new();
-        r.register_custom("file_read", |payload| {
+        r.register_custom("file_read", |payload, _input_from| {
             let path: Option<String> = payload
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -277,8 +374,9 @@ mod tests {
     impl BlockExecutor for TestFileReadBlock {
         fn execute(
             &self,
-            input: BlockInput,
+            ctx: BlockExecutionContext,
         ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+            let input = ctx.prev;
             let path = match &input {
                 BlockInput::String(s) if !s.is_empty() => PathBuf::from(s.as_str()),
                 BlockInput::Text(s) if !s.is_empty() => PathBuf::from(s.as_str()),
@@ -298,7 +396,7 @@ mod tests {
 
     fn passthrough_registry() -> BlockRegistry {
         let mut r = BlockRegistry::new();
-        r.register_custom("file_read", |payload| {
+        r.register_custom("file_read", |payload, _input_from| {
             let path: Option<String> = payload
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -307,16 +405,162 @@ mod tests {
                 path: path.map(PathBuf::from),
             }))
         });
-        r.register_custom("custom_transform", |_| Ok(Box::new(TestPassthroughBlock)));
+        r.register_custom("custom_transform", |_, _input_from| {
+            Ok(Box::new(TestPassthroughBlock))
+        });
         r
+    }
+
+    #[test]
+    fn validate_fails_when_input_source_ref_is_missing() {
+        let mut w = Workflow::new();
+        w.add_with_input_sources(
+            BlockConfig::Custom {
+                type_id: "unregistered".to_string(),
+                payload: json!({}),
+                input_from: Box::new([]),
+            },
+            &[999],
+        );
+
+        let err = w.validate().expect_err("validation should fail");
+        match err {
+            WorkflowValidationError::MissingInputSource { source_ref_key, .. } => {
+                assert_eq!(source_ref_key, 999)
+            }
+            other => panic!("unexpected validation error: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_fails_when_forced_input_source_not_upstream() {
+        struct NopBlock;
+        impl BlockExecutor for NopBlock {
+            fn execute(
+                &self,
+                _ctx: BlockExecutionContext,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
+            }
+        }
+
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("nop", |_, _input_from| Ok(Box::new(NopBlock)));
+        let mut w = Workflow::with_registry(registry);
+
+        let source = w.add_ref(
+            11,
+            BlockConfig::Custom {
+                type_id: "nop".to_string(),
+                payload: json!({}),
+                input_from: Box::new([]),
+            },
+        );
+        let entry = w.add(BlockConfig::Custom {
+            type_id: "nop".to_string(),
+            payload: json!({}),
+            input_from: Box::new([]),
+        });
+        let consumer = w.add_with_input_sources(
+            BlockConfig::Custom {
+                type_id: "nop".to_string(),
+                payload: json!({}),
+                input_from: Box::new([]),
+            },
+            &[11],
+        );
+        w.link(entry, consumer);
+
+        let err = w.validate().expect_err("validation should fail");
+        match err {
+            WorkflowValidationError::InputSourceNotUpstream {
+                block_id,
+                source_id,
+            } => {
+                assert_eq!(source_id, source.0);
+                assert_eq!(block_id, consumer.0);
+            }
+            other => panic!("unexpected validation error: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_fails_when_linkage_type_mismatch() {
+        struct JsonProducer;
+        impl BlockExecutor for JsonProducer {
+            fn execute(
+                &self,
+                _ctx: BlockExecutionContext,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Ok(crate::block::BlockExecutionResult::Once(
+                    BlockOutput::Json {
+                        value: json!({"ok": true}),
+                    },
+                ))
+            }
+
+            fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+                OutputContract::from_kind(ValueKind::Json, OutputMode::Once)
+            }
+        }
+
+        struct StringConsumer;
+        impl BlockExecutor for StringConsumer {
+            fn execute(
+                &self,
+                _ctx: BlockExecutionContext,
+            ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
+            }
+
+            fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+                let expected = ValueKindSet::singleton(ValueKind::String);
+                if !ctx.forced_refs.is_empty() {
+                    if ctx.forced_refs.iter().all(|c| c.kinds.intersects(expected)) {
+                        return Ok(());
+                    }
+                    return Err(BlockError::Other("string input required".into()));
+                }
+                match &ctx.prev {
+                    InputContract::One(kinds) if kinds.intersects(expected) => Ok(()),
+                    _ => Err(BlockError::Other("string input required".into())),
+                }
+            }
+        }
+
+        let mut registry = BlockRegistry::new();
+        registry.register_custom("producer", |_, _input_from| Ok(Box::new(JsonProducer)));
+        registry.register_custom("consumer", |_, _input_from| Ok(Box::new(StringConsumer)));
+
+        let mut w = Workflow::with_registry(registry);
+        let producer = w.add(BlockConfig::Custom {
+            type_id: "producer".to_string(),
+            payload: json!({}),
+            input_from: Box::new([]),
+        });
+        let consumer = w.add(BlockConfig::Custom {
+            type_id: "consumer".to_string(),
+            payload: json!({}),
+            input_from: Box::new([]),
+        });
+        w.link(producer, consumer);
+
+        let err = w.validate().expect_err("validation should fail");
+        match err {
+            WorkflowValidationError::BlockLinkage { block_id, .. } => {
+                assert_eq!(block_id, consumer.0);
+            }
+            other => panic!("unexpected validation error: {other}"),
+        }
     }
 
     struct TestPassthroughBlock;
     impl BlockExecutor for TestPassthroughBlock {
         fn execute(
             &self,
-            input: BlockInput,
+            ctx: BlockExecutionContext,
         ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+            let input = ctx.prev;
             let output = match input {
                 BlockInput::Empty => BlockOutput::empty(),
                 BlockInput::String(s) => BlockOutput::String { value: s },
@@ -344,6 +588,7 @@ mod tests {
         w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let output = w.run().unwrap();
         let s: Option<String> = output.into();
@@ -356,6 +601,7 @@ mod tests {
         w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": null }),
+            input_from: Box::new([]),
         });
         let result = w.run();
         assert!(result.is_err());
@@ -377,10 +623,12 @@ mod tests {
         let read_id = w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let transform_id = w.add(BlockConfig::Custom {
             type_id: "custom_transform".to_string(),
             payload: json!({ "template": null }),
+            input_from: Box::new([]),
         });
         w.link(read_id, transform_id);
         let output = w.run().unwrap();
@@ -401,8 +649,9 @@ mod tests {
         impl BlockExecutor for UppercaseBlock {
             fn execute(
                 &self,
-                input: BlockInput,
+                ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let input = ctx.prev;
                 let s = match &input {
                     BlockInput::String(t) => t.to_uppercase(),
                     BlockInput::Text(t) => t.to_uppercase(),
@@ -428,7 +677,7 @@ mod tests {
         }
 
         let mut registry = passthrough_registry();
-        registry.register_custom("uppercase", |payload| {
+        registry.register_custom("uppercase", |payload, _input_from| {
             let prefix = payload
                 .get("prefix")
                 .and_then(|v| v.as_str())
@@ -446,6 +695,7 @@ mod tests {
         let read_id = w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let upper_id = w
             .add_custom(
@@ -470,7 +720,9 @@ mod tests {
         }
 
         let mut registry = BlockRegistry::new();
-        registry.register_custom("x", |_| Err(crate::block::BlockError::Other("".into())));
+        registry.register_custom("x", |_, _input_from| {
+            Err(crate::block::BlockError::Other("".into()))
+        });
         let mut w = Workflow::with_registry(registry);
         let err = w.add_custom("", DummyConfig { key: "".into() });
         assert!(err.is_err());
@@ -490,6 +742,7 @@ mod tests {
                 BlockConfig::Custom {
                     type_id: "custom_transform".to_string(),
                     payload: json!({ "template": null }),
+                    input_from: Box::new([]),
                 },
             )
             .set_entry(transform_id)
@@ -504,6 +757,7 @@ mod tests {
         let read_id = w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let child_id = w.add_child_workflow(child_def);
         w.link(read_id, child_id);
@@ -530,6 +784,7 @@ mod tests {
                 BlockConfig::Custom {
                     type_id: "custom_transform".to_string(),
                     payload: json!({ "template": null }),
+                    input_from: Box::new([]),
                 },
             )
             .add_node(
@@ -537,6 +792,7 @@ mod tests {
                 BlockConfig::Custom {
                     type_id: "custom_transform".to_string(),
                     payload: json!({ "template": null }),
+                    input_from: Box::new([]),
                 },
             )
             .add_edge(transform1, transform2)
@@ -552,6 +808,7 @@ mod tests {
         let read_id = w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let child_id = w.add_child_workflow(child_def);
         w.link(read_id, child_id);
@@ -573,6 +830,7 @@ mod tests {
         child.add(BlockConfig::Custom {
             type_id: "custom_transform".to_string(),
             payload: json!({ "template": null }),
+            input_from: Box::new([]),
         });
         let child_def = child.into_definition();
 
@@ -580,6 +838,7 @@ mod tests {
         let read_id = w.add(BlockConfig::Custom {
             type_id: "file_read".to_string(),
             payload: json!({ "path": path_str }),
+            input_from: Box::new([]),
         });
         let child_id = w.add_child_workflow(child_def);
         w.link(read_id, child_id);
@@ -595,7 +854,7 @@ mod tests {
         impl BlockExecutor for AlwaysFailBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 Err(crate::block::BlockError::Other("boom".into()))
             }
@@ -607,8 +866,9 @@ mod tests {
         impl BlockExecutor for ErrorToFileBlock {
             fn execute(
                 &self,
-                input: BlockInput,
+                ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
+                let input = ctx.prev;
                 let message = match input {
                     BlockInput::Error { message } => message,
                     _ => {
@@ -628,8 +888,10 @@ mod tests {
         let error_file_str = error_file.to_string_lossy().to_string();
 
         let mut registry = BlockRegistry::new();
-        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
-        registry.register_custom("error_to_file", |payload| {
+        registry.register_custom("always_fail", |_, _input_from| {
+            Ok(Box::new(AlwaysFailBlock))
+        });
+        registry.register_custom("error_to_file", |payload, _input_from| {
             let path = payload
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -706,7 +968,7 @@ mod tests {
         impl BlockExecutor for TwoTickEntryBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 let (tx, rx) = tokio::sync::mpsc::channel(4);
                 tokio::runtime::Handle::current().spawn(async move {
@@ -731,7 +993,7 @@ mod tests {
         impl BlockExecutor for SkipThenPassBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
                 if call_index == 0 {
@@ -754,9 +1016,11 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = BlockRegistry::new();
-        registry.register_custom("two_tick_entry", |_| Ok(Box::new(TwoTickEntryBlock)));
+        registry.register_custom("two_tick_entry", |_, _input_from| {
+            Ok(Box::new(TwoTickEntryBlock))
+        });
         let calls_for_block = Arc::clone(&calls);
-        registry.register_custom("skip_then_pass", move |_| {
+        registry.register_custom("skip_then_pass", move |_, _input_from| {
             Ok(Box::new(SkipThenPassBlock {
                 calls: Arc::clone(&calls_for_block),
             }))
@@ -789,10 +1053,12 @@ mod tests {
         let a = BlockConfig::Custom {
             type_id: "a".to_string(),
             payload: json!({"k":"a"}),
+            input_from: Box::new([]),
         };
         let b = BlockConfig::Custom {
             type_id: "b".to_string(),
             payload: json!({"k":"b"}),
+            input_from: Box::new([]),
         };
 
         w.link(&a, &b);
@@ -810,20 +1076,24 @@ mod tests {
             BlockConfig::Custom {
                 type_id: "a".to_string(),
                 payload: json!({"k":"a"}),
+                input_from: Box::new([]),
             },
             BlockConfig::Custom {
                 type_id: "b".to_string(),
                 payload: json!({"k":"b"}),
+                input_from: Box::new([]),
             },
         );
         w.link(
             BlockConfig::Custom {
                 type_id: "a".to_string(),
                 payload: json!({"k":"a"}),
+                input_from: Box::new([]),
             },
             BlockConfig::Custom {
                 type_id: "b".to_string(),
                 payload: json!({"k":"b"}),
+                input_from: Box::new([]),
             },
         );
 
@@ -837,10 +1107,12 @@ mod tests {
         let src = BlockConfig::Custom {
             type_id: "src".to_string(),
             payload: json!({}),
+            input_from: Box::new([]),
         };
         let handler = BlockConfig::Custom {
             type_id: "handler".to_string(),
             payload: json!({}),
+            input_from: Box::new([]),
         };
 
         w.on_error(&src, &handler);
@@ -866,7 +1138,7 @@ mod tests {
         impl BlockExecutor for AlwaysFailBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 Err(crate::block::BlockError::Other("boom".into()))
             }
@@ -879,7 +1151,7 @@ mod tests {
         impl BlockExecutor for ParallelProbeHandler {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 let now_active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 let mut prev_max = self.max_active.load(Ordering::SeqCst);
@@ -901,10 +1173,12 @@ mod tests {
         let max_active = Arc::new(AtomicUsize::new(0));
 
         let mut registry = BlockRegistry::new();
-        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
+        registry.register_custom("always_fail", |_, _input_from| {
+            Ok(Box::new(AlwaysFailBlock))
+        });
         let a1 = Arc::clone(&active);
         let m1 = Arc::clone(&max_active);
-        registry.register_custom("handler_a", move |_| {
+        registry.register_custom("handler_a", move |_, _input_from| {
             Ok(Box::new(ParallelProbeHandler {
                 active: Arc::clone(&a1),
                 max_active: Arc::clone(&m1),
@@ -912,7 +1186,7 @@ mod tests {
         });
         let a2 = Arc::clone(&active);
         let m2 = Arc::clone(&max_active);
-        registry.register_custom("handler_b", move |_| {
+        registry.register_custom("handler_b", move |_, _input_from| {
             Ok(Box::new(ParallelProbeHandler {
                 active: Arc::clone(&a2),
                 max_active: Arc::clone(&m2),
@@ -946,7 +1220,7 @@ mod tests {
         impl BlockExecutor for AlwaysFailBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 Err(crate::block::BlockError::Other("source boom".into()))
             }
@@ -956,7 +1230,7 @@ mod tests {
         impl BlockExecutor for HandlerFail {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 Err(crate::block::BlockError::Other("handler boom".into()))
             }
@@ -966,16 +1240,18 @@ mod tests {
         impl BlockExecutor for HandlerOk {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 Ok(crate::block::BlockExecutionResult::Once(BlockOutput::Empty))
             }
         }
 
         let mut registry = BlockRegistry::new();
-        registry.register_custom("always_fail", |_| Ok(Box::new(AlwaysFailBlock)));
-        registry.register_custom("handler_fail", |_| Ok(Box::new(HandlerFail)));
-        registry.register_custom("handler_ok", |_| Ok(Box::new(HandlerOk)));
+        registry.register_custom("always_fail", |_, _input_from| {
+            Ok(Box::new(AlwaysFailBlock))
+        });
+        registry.register_custom("handler_fail", |_, _input_from| Ok(Box::new(HandlerFail)));
+        registry.register_custom("handler_ok", |_, _input_from| Ok(Box::new(HandlerOk)));
 
         let mut w = Workflow::with_registry(registry);
         let fail_id = w
@@ -1016,7 +1292,7 @@ mod tests {
         impl BlockExecutor for FlakyBlock {
             fn execute(
                 &self,
-                _input: BlockInput,
+                _ctx: BlockExecutionContext,
             ) -> Result<crate::block::BlockExecutionResult, crate::block::BlockError> {
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 if call == 0 {
@@ -1031,7 +1307,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = BlockRegistry::new();
         let calls_for_flaky = Arc::clone(&calls);
-        registry.register_custom("flaky", move |_| {
+        registry.register_custom("flaky", move |_, _input_from| {
             Ok(Box::new(FlakyBlock {
                 calls: Arc::clone(&calls_for_flaky),
             }))
@@ -1044,6 +1320,7 @@ mod tests {
                 BlockConfig::Custom {
                     type_id: "flaky".to_string(),
                     payload: json!({}),
+                    input_from: Box::new([]),
                 },
             )
             .set_entry(child_entry)

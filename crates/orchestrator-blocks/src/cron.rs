@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockOutput,
+    OutputContract, OutputMode, ValidateContext, ValueKind,
 };
 
 /// Error from cron/schedule operations.
@@ -53,12 +54,16 @@ impl CronBlock {
 }
 
 impl BlockExecutor for CronBlock {
-    fn execute(&self, _input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, _ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
         let rx = self
             .runner
             .run(&self.config.cron)
             .map_err(|e| BlockError::Other(e.0))?;
         Ok(BlockExecutionResult::Recurring(rx))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Text, OutputMode::Recurring)
     }
 }
 
@@ -124,12 +129,24 @@ pub fn register_cron(
     runner: Arc<dyn CronRunner>,
 ) {
     let runner = Arc::clone(&runner);
-    registry.register_custom("cron", move |payload| {
+    registry.register_custom("cron", move |payload, _input_from| {
         let mut config: CronConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
         config.cron = config.cron.trim().to_string();
         Ok(Box::new(CronBlock::new(config, Arc::clone(&runner))))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: orchestrator_core::block::BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -140,7 +157,7 @@ mod tests {
     fn cron_config_invalid_fails_at_execute() {
         let config = CronConfig::new("not a cron");
         let block = CronBlock::new(config, Arc::new(StdCronRunner));
-        let result = block.execute(BlockInput::empty());
+        let result = block.execute(test_ctx(orchestrator_core::block::BlockInput::empty()));
         assert!(result.is_err());
     }
 
@@ -148,7 +165,9 @@ mod tests {
     async fn cron_block_returns_recurring_receiver() {
         let config = CronConfig::new("* * * * * * *");
         let block = CronBlock::new(config, Arc::new(StdCronRunner));
-        let result = block.execute(BlockInput::empty()).unwrap();
+        let result = block
+            .execute(test_ctx(orchestrator_core::block::BlockInput::empty()))
+            .unwrap();
         match result {
             BlockExecutionResult::Recurring(mut rx) => {
                 let first = rx.recv().await.unwrap();

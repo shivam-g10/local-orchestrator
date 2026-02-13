@@ -5,8 +5,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 /// Error from split-by-keys operations.
@@ -44,16 +48,27 @@ impl SplitByKeysConfig {
 pub struct SplitByKeysBlock {
     config: SplitByKeysConfig,
     strategy: Arc<dyn SplitByKeysStrategy>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl SplitByKeysBlock {
     pub fn new(config: SplitByKeysConfig, strategy: Arc<dyn SplitByKeysStrategy>) -> Self {
-        Self { config, strategy }
+        Self {
+            config,
+            strategy,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
 impl BlockExecutor for SplitByKeysBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let obj = match &input {
             BlockInput::Json(v) => v.clone(),
             BlockInput::String(s) => {
@@ -78,6 +93,21 @@ impl BlockExecutor for SplitByKeysBlock {
             .split(&self.config.keys, &serde_json::Value::Object(obj.clone()))
             .map_err(|e| BlockError::Other(e.0))?;
         Ok(BlockExecutionResult::Multiple(outputs))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Json, OutputMode::Multiple)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(
+            ctx,
+            ValueKindSet::singleton(ValueKind::Empty)
+                | ValueKindSet::singleton(ValueKind::String)
+                | ValueKindSet::singleton(ValueKind::Text)
+                | ValueKindSet::singleton(ValueKind::Json),
+        )
     }
 }
 
@@ -110,14 +140,25 @@ pub fn register_split_by_keys(
     strategy: Arc<dyn SplitByKeysStrategy>,
 ) {
     let strategy = Arc::clone(&strategy);
-    registry.register_custom("split_by_keys", move |payload| {
+    registry.register_custom("split_by_keys", move |payload, input_from| {
         let config: SplitByKeysConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SplitByKeysBlock::new(
-            config,
-            Arc::clone(&strategy),
-        )))
+        Ok(Box::new(
+            SplitByKeysBlock::new(config, Arc::clone(&strategy)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +170,7 @@ mod tests {
         let config = SplitByKeysConfig::new(vec!["a".into(), "b".into(), "c".into()]);
         let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::Json(serde_json::json!({"a": 1, "b": "two", "c": true}));
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Multiple(outs) => {
                 assert_eq!(outs.len(), 3);
@@ -163,7 +204,7 @@ mod tests {
         let input = BlockInput::List {
             items: vec!["a".into(), "b".into()],
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("Json or string"));
     }
@@ -175,7 +216,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
     }
@@ -185,7 +226,7 @@ mod tests {
         let config = SplitByKeysConfig::new(vec!["a".into()]);
         let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::String("not valid json".into());
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
     }
 
@@ -194,7 +235,7 @@ mod tests {
         let config = SplitByKeysConfig::new(vec!["a".into()]);
         let block = SplitByKeysBlock::new(config, Arc::new(KeyExtractSplitStrategy));
         let input = BlockInput::Json(serde_json::json!([1, 2, 3]));
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("JSON object"));
     }

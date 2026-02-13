@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::resolve_effective_input;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind,
 };
 
 /// Error from combine operations.
@@ -56,11 +58,21 @@ fn output_to_value(o: &BlockOutput) -> serde_json::Value {
 pub struct CombineBlock {
     config: CombineConfig,
     strategy: Arc<dyn CombineStrategy>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl CombineBlock {
     pub fn new(config: CombineConfig, strategy: Arc<dyn CombineStrategy>) -> Self {
-        Self { config, strategy }
+        Self {
+            config,
+            strategy,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
@@ -77,13 +89,18 @@ fn input_to_outputs(input: BlockInput) -> Result<Vec<BlockOutput>, BlockError> {
 }
 
 impl BlockExecutor for CombineBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let outputs = input_to_outputs(input)?;
         let value = self
             .strategy
             .combine(&self.config.keys, &outputs)
             .map_err(|e| BlockError::Other(e.0))?;
         Ok(BlockExecutionResult::Once(BlockOutput::Json { value }))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Json, OutputMode::Once)
     }
 }
 
@@ -114,11 +131,25 @@ pub fn register_combine(
     strategy: Arc<dyn CombineStrategy>,
 ) {
     let strategy = Arc::clone(&strategy);
-    registry.register_custom("combine", move |payload| {
+    registry.register_custom("combine", move |payload, input_from| {
         let config: CombineConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(CombineBlock::new(config, Arc::clone(&strategy))))
+        Ok(Box::new(
+            CombineBlock::new(config, Arc::clone(&strategy)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +170,7 @@ mod tests {
                 },
             ],
         };
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 let obj = value.as_object().unwrap();
@@ -155,7 +186,7 @@ mod tests {
         let config = CombineConfig::new(vec!["x".into()]);
         let block = CombineBlock::new(config, Arc::new(KeyedCombineStrategy));
         let input = BlockInput::String("hello".into());
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 let obj = value.as_object().unwrap();
@@ -172,7 +203,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream error".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream error"));
     }

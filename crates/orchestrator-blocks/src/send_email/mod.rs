@@ -15,9 +15,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use crate::input_binding::{
+    resolve_effective_input, validate_expected_input, validate_single_input_mode,
+};
 use orchestrator_core::RetryPolicy;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 pub use lettre_env::EnvSmtpMailer;
@@ -49,7 +53,8 @@ pub trait SendEmail: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SendEmailConfig {
-    pub to: String,
+    #[serde(default)]
+    pub to: Option<String>,
     pub subject: Option<String>,
     pub smtp_host: Option<String>,
     pub smtp_port: Option<u16>,
@@ -70,7 +75,7 @@ fn default_retry_policy() -> RetryPolicy {
 impl SendEmailConfig {
     pub fn new(to: impl Into<String>) -> Self {
         Self {
-            to: to.into(),
+            to: Some(to.into()),
             subject: None,
             smtp_host: None,
             smtp_port: None,
@@ -83,11 +88,21 @@ impl SendEmailConfig {
 pub struct SendEmailBlock {
     config: SendEmailConfig,
     mailer: Arc<dyn SendEmail>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl SendEmailBlock {
     pub fn new(config: SendEmailConfig, mailer: Arc<dyn SendEmail>) -> Self {
-        Self { config, mailer }
+        Self {
+            config,
+            mailer,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
@@ -112,17 +127,23 @@ fn email_domain(email: &str) -> Option<&str> {
 
 fn parse_input(
     input: &BlockInput,
-    default_to: &str,
+    default_to: Option<&str>,
+    force_default_to: bool,
     default_subject: &str,
 ) -> Result<(String, String, String, String), BlockError> {
     match input {
         BlockInput::Json(v) => {
-            let to_email = v
+            let from_input = v
                 .get("to")
                 .or_else(|| v.get("email"))
                 .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| default_to.to_string());
+                .map(String::from);
+            let to_email = if force_default_to {
+                default_to.map(String::from)
+            } else {
+                from_input.or_else(|| default_to.map(String::from))
+            }
+            .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?;
             let to_name = v
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -141,25 +162,33 @@ fn parse_input(
             Ok((to_email, to_name, subject, body))
         }
         BlockInput::String(s) => Ok((
-            default_to.to_string(),
+            default_to
+                .map(String::from)
+                .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?,
             String::new(),
             default_subject.to_string(),
             s.clone(),
         )),
         BlockInput::Text(s) => Ok((
-            default_to.to_string(),
+            default_to
+                .map(String::from)
+                .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?,
             String::new(),
             default_subject.to_string(),
             s.clone(),
         )),
         BlockInput::Empty => Ok((
-            default_to.to_string(),
+            default_to
+                .map(String::from)
+                .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?,
             String::new(),
             default_subject.to_string(),
             String::new(),
         )),
         BlockInput::List { items } => Ok((
-            default_to.to_string(),
+            default_to
+                .map(String::from)
+                .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?,
             String::new(),
             default_subject.to_string(),
             items.join("\n"),
@@ -171,7 +200,9 @@ fn parse_input(
                 .collect::<Vec<_>>()
                 .join("\n");
             Ok((
-                default_to.to_string(),
+                default_to
+                    .map(String::from)
+                    .ok_or_else(|| BlockError::Other("send_email recipient is required".into()))?,
                 String::new(),
                 default_subject.to_string(),
                 body,
@@ -182,13 +213,20 @@ fn parse_input(
 }
 
 impl BlockExecutor for SendEmailBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
         let default_subject = self.config.subject.as_deref().unwrap_or("");
+        let force_default_to = self.input_from.is_empty() && self.config.to.is_some();
+        let default_to = if self.input_from.is_empty() {
+            self.config.to.as_deref()
+        } else {
+            None
+        };
         let (to_email, to_name, subject, body) =
-            parse_input(&input, &self.config.to, default_subject)?;
+            parse_input(&input, default_to, force_default_to, default_subject)?;
         debug!(
             event = "email.send_configured",
             domain = "email",
@@ -278,6 +316,22 @@ impl BlockExecutor for SendEmailBlock {
             value: serde_json::json!({ "sent": true, "to": to_email }),
         }))
     }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Json, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        if !self.input_from.is_empty() {
+            validate_single_input_mode(ctx)?;
+            return validate_expected_input(ctx, ValueKindSet::singleton(ValueKind::Json));
+        }
+        if self.config.to.is_some() {
+            return Ok(());
+        }
+        validate_single_input_mode(ctx)?;
+        validate_expected_input(ctx, ValueKindSet::singleton(ValueKind::Json))
+    }
 }
 
 fn send_once_with_timeout(
@@ -353,11 +407,25 @@ pub fn register_send_email(
     mailer: Arc<dyn SendEmail>,
 ) {
     let mailer = Arc::clone(&mailer);
-    registry.register_custom("send_email", move |payload| {
+    registry.register_custom("send_email", move |payload, input_from| {
         let config: SendEmailConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(SendEmailBlock::new(config, Arc::clone(&mailer))))
+        Ok(Box::new(
+            SendEmailBlock::new(config, Arc::clone(&mailer)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 /// Register send_email with the built-in env-based SMTP mailer.
@@ -389,7 +457,7 @@ mod tests {
         let config = SendEmailConfig::new("user@example.com");
         let block = SendEmailBlock::new(config, Arc::new(NoOpSendEmail));
         let input = BlockInput::String("Hello body".into());
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("sent"), Some(&serde_json::json!(true)));
@@ -413,13 +481,13 @@ mod tests {
             "subject": "Hello",
             "body": "Email body text"
         }));
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("sent"), Some(&serde_json::json!(true)));
                 assert_eq!(
                     value.get("to"),
-                    Some(&serde_json::json!("recipient@example.com"))
+                    Some(&serde_json::json!("default@example.com"))
                 );
             }
             _ => panic!("expected Once(Json)"),
@@ -433,8 +501,40 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
+    }
+
+    #[test]
+    fn send_email_precedence_forced_over_config() {
+        let source_id = uuid::Uuid::new_v4();
+        let ctx = test_ctx(BlockInput::empty());
+        ctx.store.insert(
+            source_id,
+            orchestrator_core::block::StoredOutput::Once(Arc::new(BlockOutput::Json {
+                value: serde_json::json!({
+                    "to": "forced@example.com",
+                    "subject": "From forced",
+                    "body": "forced body"
+                }),
+            })),
+        );
+
+        let mut config = SendEmailConfig::new("config@example.com");
+        config.subject = Some("From config".into());
+        let block = SendEmailBlock::new(config, Arc::new(NoOpSendEmail))
+            .with_input_from(vec![source_id].into_boxed_slice());
+        let result = block.execute(ctx).unwrap();
+        match result {
+            BlockExecutionResult::Once(BlockOutput::Json { value }) => {
+                assert_eq!(value.get("sent"), Some(&serde_json::json!(true)));
+                assert_eq!(
+                    value.get("to"),
+                    Some(&serde_json::json!("forced@example.com"))
+                );
+            }
+            _ => panic!("expected Once(Json)"),
+        }
     }
 }

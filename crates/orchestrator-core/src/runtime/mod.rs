@@ -1,13 +1,17 @@
 mod graph;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::block::{
-    BlockConfig, BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
-    BlockRegistry, ChildWorkflowConfig,
+    BlockConfig, BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor,
+    BlockInput, BlockOutput, BlockRegistry, ChildWorkflowConfig, InputContract, OutputContract,
+    SharedRunStore, StoredOutput, ValidateContext, ValueKind, ValueKindSet,
+    input_contract_from_predecessors,
 };
 use crate::core::{RunState, WorkflowDefinition, WorkflowRun};
+use dashmap::DashMap;
 use futures::future::join_all;
 use thiserror::Error;
 use tracing::{Instrument, Span, debug, error, info, info_span};
@@ -64,6 +68,26 @@ struct BlockLogContext {
 fn run_span(ctx: &RunLogContext) -> Span {
     let _ = ctx;
     info_span!("workflow.run")
+}
+
+fn is_upstream(def: &WorkflowDefinition, source: Uuid, target: Uuid) -> bool {
+    if source == target {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([source]);
+    while let Some(node_id) = queue.pop_front() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        for succ in successors(def, node_id) {
+            if succ == target {
+                return true;
+            }
+            queue.push_back(succ);
+        }
+    }
+    false
 }
 
 fn block_span(ctx: &BlockLogContext) -> Span {
@@ -390,6 +414,20 @@ async fn result_to_output_async(result: BlockExecutionResult) -> Result<BlockOut
 /// Map from node that produced Multiple to list of (successor_id, output) in edge order.
 type MultiOutputs = HashMap<Uuid, Vec<(Uuid, BlockOutput)>>;
 
+fn store_once(store: &SharedRunStore, block_id: Uuid, output: &BlockOutput) {
+    store.insert(
+        block_id,
+        StoredOutput::Once(std::sync::Arc::new(output.clone())),
+    );
+}
+
+fn store_multiple(store: &SharedRunStore, block_id: Uuid, outputs: &[BlockOutput]) {
+    store.insert(
+        block_id,
+        StoredOutput::Multiple(std::sync::Arc::from(outputs.to_vec().into_boxed_slice())),
+    );
+}
+
 /// Resolve one predecessor's output for a node: from outputs (Once) or multi_outputs (Multiple).
 fn output_from_predecessor(
     pred_id: Uuid,
@@ -578,11 +616,20 @@ fn execute_block_in_current_task(
     attempt: u32,
     block: Box<dyn BlockExecutor>,
     input: BlockInput,
+    store: SharedRunStore,
 ) -> Result<BlockExecutionResult, BlockError> {
     let ctx = run_ctx.for_block(block_id, block_type, attempt);
     log_block_input_prepared(&ctx, &input);
     log_block_started(&ctx);
-    let result = block_span(&ctx).in_scope(|| block.execute(input));
+    let exec_ctx = BlockExecutionContext {
+        workflow_id: run_ctx.workflow_id,
+        run_id: run_ctx.run_id,
+        block_id,
+        attempt,
+        prev: input,
+        store,
+    };
+    let result = block_span(&ctx).in_scope(|| block.execute(exec_ctx));
     match &result {
         Ok(exec_result) => {
             log_block_result_received(&ctx, exec_result);
@@ -600,12 +647,21 @@ fn spawn_block_execution(
     attempt: u32,
     block: Box<dyn BlockExecutor>,
     input: BlockInput,
+    store: SharedRunStore,
 ) -> JoinHandleBlock {
     tokio::task::spawn_blocking(move || {
         let ctx = run_ctx.for_block(block_id, block_type, attempt);
         log_block_input_prepared(&ctx, &input);
         log_block_started(&ctx);
-        let result = block_span(&ctx).in_scope(|| block.execute(input));
+        let exec_ctx = BlockExecutionContext {
+            workflow_id: run_ctx.workflow_id,
+            run_id: run_ctx.run_id,
+            block_id,
+            attempt,
+            prev: input,
+            store,
+        };
+        let result = block_span(&ctx).in_scope(|| block.execute(exec_ctx));
         match &result {
             Ok(exec_result) => {
                 log_block_result_received(&ctx, exec_result);
@@ -624,6 +680,7 @@ async fn run_child_workflow_with_policy(
     block_type: &str,
     registry: &BlockRegistry,
     input: BlockInput,
+    store: SharedRunStore,
 ) -> Result<BlockOutput, RuntimeError> {
     let mut retries_done = 0u32;
     loop {
@@ -651,6 +708,7 @@ async fn run_child_workflow_with_policy(
                 &mut child_run,
                 registry,
                 Some(input.clone()),
+                Some(store.clone()),
             ));
             match cfg.timeout_ms {
                 Some(ms) => {
@@ -732,6 +790,7 @@ async fn run_error_handler_node(
     def: &WorkflowDefinition,
     run_ctx: &RunLogContext,
     registry: &BlockRegistry,
+    store: SharedRunStore,
     handler_id: Uuid,
     message: String,
 ) -> Result<Uuid, RuntimeError> {
@@ -751,6 +810,7 @@ async fn run_error_handler_node(
                 node_def.config.block_type(),
                 registry,
                 input,
+                store.clone(),
             )
             .await?;
         }
@@ -763,6 +823,7 @@ async fn run_error_handler_node(
                 1,
                 block,
                 input,
+                store.clone(),
             )
             .await
             .map_err(|e| RuntimeError::Block(BlockError::Other(e.to_string())))??;
@@ -782,6 +843,7 @@ async fn run_error_handlers(
     def: &WorkflowDefinition,
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
+    store: SharedRunStore,
     node_id: Uuid,
     message: &str,
 ) -> bool {
@@ -814,7 +876,14 @@ async fn run_error_handlers(
         );
     }
     let futures = handlers_with_types.iter().map(|(handler_id, _)| {
-        run_error_handler_node(def, &run_ctx, registry, *handler_id, envelope.clone())
+        run_error_handler_node(
+            def,
+            &run_ctx,
+            registry,
+            store.clone(),
+            *handler_id,
+            envelope.clone(),
+        )
     });
     let results = join_all(futures).await;
     let mut success_count = 0u64;
@@ -868,10 +937,170 @@ pub enum RuntimeError {
     EntryNodeNotFound(Uuid),
     #[error("block error: {0}")]
     Block(#[from] BlockError),
+    #[error("workflow validation failed: {0}")]
+    WorkflowValidation(#[from] WorkflowValidationError),
     #[error("workflow has no sink (no block with no outgoing edges)")]
     NoSink,
     #[error("iteration budget exceeded (cycle or too many steps)")]
     IterationBudgetExceeded,
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum WorkflowValidationError {
+    #[error("workflow graph has a cycle; validation requires DAG topology")]
+    CyclicGraph,
+    #[error("validation node not found: {0}")]
+    NodeNotFound(Uuid),
+    #[error("missing input source for block {block_id}: ref_key={source_ref_key}")]
+    MissingInputSource {
+        block_id: Uuid,
+        source_ref_key: usize,
+    },
+    #[error("input source {source_id} not found for block {block_id}")]
+    InputSourceNodeMissing { block_id: Uuid, source_id: Uuid },
+    #[error("input source {source_id} is not upstream of block {block_id}")]
+    InputSourceNotUpstream { block_id: Uuid, source_id: Uuid },
+    #[error("missing predecessor contract for block {block_id}: predecessor {predecessor_id}")]
+    MissingPredecessorContract {
+        block_id: Uuid,
+        predecessor_id: Uuid,
+    },
+    #[error("missing forced-ref contract for block {block_id}: source {source_id}")]
+    MissingForcedRefContract { block_id: Uuid, source_id: Uuid },
+    #[error("block {block_id} failed linkage validation: {message}")]
+    BlockLinkage { block_id: Uuid, message: String },
+}
+
+pub fn validate_workflow(
+    def: &WorkflowDefinition,
+    registry: &BlockRegistry,
+) -> Result<(), WorkflowValidationError> {
+    let order = topo_order(def).map_err(|_| WorkflowValidationError::CyclicGraph)?;
+    let mut contracts: HashMap<Uuid, OutputContract> = HashMap::new();
+    for node_id in order {
+        let node_def = def
+            .nodes()
+            .get(&node_id)
+            .ok_or(WorkflowValidationError::NodeNotFound(node_id))?;
+        let predecessors = predecessors(def, node_id);
+        let pred_contracts: Result<Vec<OutputContract>, WorkflowValidationError> = predecessors
+            .iter()
+            .map(|pred_id| {
+                contracts.get(pred_id).copied().ok_or(
+                    WorkflowValidationError::MissingPredecessorContract {
+                        block_id: node_id,
+                        predecessor_id: *pred_id,
+                    },
+                )
+            })
+            .collect();
+        let prev = input_contract_from_predecessors(&pred_contracts?);
+        let forced_ids: &[Uuid] = match &node_def.config {
+            BlockConfig::Custom { input_from, .. } => input_from,
+            _ => &[],
+        };
+        let mut forced_refs = Vec::with_capacity(forced_ids.len());
+        for source_id in forced_ids {
+            if !def.nodes().contains_key(source_id) {
+                return Err(WorkflowValidationError::InputSourceNodeMissing {
+                    block_id: node_id,
+                    source_id: *source_id,
+                });
+            }
+            if !is_upstream(def, *source_id, node_id) {
+                return Err(WorkflowValidationError::InputSourceNotUpstream {
+                    block_id: node_id,
+                    source_id: *source_id,
+                });
+            }
+            let contract = contracts.get(source_id).copied().ok_or(
+                WorkflowValidationError::MissingForcedRefContract {
+                    block_id: node_id,
+                    source_id: *source_id,
+                },
+            )?;
+            forced_refs.push(contract);
+        }
+        let ctx = ValidateContext {
+            block_id: node_id,
+            prev,
+            forced_refs: &forced_refs,
+        };
+        let output = match &node_def.config {
+            BlockConfig::ChildWorkflow(_) => OutputContract::any_once(),
+            _ => {
+                let block = registry.get(&node_def.config).map_err(|e| {
+                    WorkflowValidationError::BlockLinkage {
+                        block_id: node_id,
+                        message: e.to_string(),
+                    }
+                })?;
+                block.validate_linkage(&ctx).map_err(|e| {
+                    WorkflowValidationError::BlockLinkage {
+                        block_id: node_id,
+                        message: e.to_string(),
+                    }
+                })?;
+                block.infer_output_contract(&ctx)
+            }
+        };
+        contracts.insert(node_id, output);
+    }
+
+    let error_prev = InputContract::One(ValueKindSet::singleton(ValueKind::Text));
+    for (_, handler_id) in def.error_edges() {
+        let handler = def
+            .nodes()
+            .get(handler_id)
+            .ok_or(WorkflowValidationError::NodeNotFound(*handler_id))?;
+        let forced_ids: &[Uuid] = match &handler.config {
+            BlockConfig::Custom { input_from, .. } => input_from,
+            _ => &[],
+        };
+        let mut forced_refs = Vec::with_capacity(forced_ids.len());
+        for source_id in forced_ids {
+            if !def.nodes().contains_key(source_id) {
+                return Err(WorkflowValidationError::InputSourceNodeMissing {
+                    block_id: *handler_id,
+                    source_id: *source_id,
+                });
+            }
+            if !is_upstream(def, *source_id, *handler_id) {
+                return Err(WorkflowValidationError::InputSourceNotUpstream {
+                    block_id: *handler_id,
+                    source_id: *source_id,
+                });
+            }
+            let contract = contracts.get(source_id).copied().ok_or(
+                WorkflowValidationError::MissingForcedRefContract {
+                    block_id: *handler_id,
+                    source_id: *source_id,
+                },
+            )?;
+            forced_refs.push(contract);
+        }
+        let ctx = ValidateContext {
+            block_id: *handler_id,
+            prev: error_prev.clone(),
+            forced_refs: &forced_refs,
+        };
+        if let BlockConfig::Custom { .. } = &handler.config {
+            let block = registry.get(&handler.config).map_err(|e| {
+                WorkflowValidationError::BlockLinkage {
+                    block_id: *handler_id,
+                    message: e.to_string(),
+                }
+            })?;
+            block
+                .validate_linkage(&ctx)
+                .map_err(|e| WorkflowValidationError::BlockLinkage {
+                    block_id: *handler_id,
+                    message: e.to_string(),
+                })?;
+        }
+    }
+
+    Ok(())
 }
 
 fn is_no_new_items_runtime_error(err: &RuntimeError) -> bool {
@@ -894,8 +1123,10 @@ pub async fn run_workflow(
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
     entry_input: Option<BlockInput>,
+    shared_store: Option<SharedRunStore>,
 ) -> Result<BlockOutput, RuntimeError> {
     def.entry().ok_or(RuntimeError::NoEntryNode)?;
+    let store = shared_store.unwrap_or_else(|| Arc::new(DashMap::new()));
     let run_ctx = RunLogContext::from_run(run);
     let _run_guard = run_span(&run_ctx).entered();
     log_run_created(&run_ctx);
@@ -929,16 +1160,26 @@ pub async fn run_workflow(
                     node_def.config.block_type(),
                     registry,
                     input,
+                    store.clone(),
                 )
                 .await
                 {
                     Ok(out) => out,
                     Err(err) => {
-                        run_error_handlers(def, run, registry, entry_id, &err.to_string()).await;
+                        run_error_handlers(
+                            def,
+                            run,
+                            registry,
+                            store.clone(),
+                            entry_id,
+                            &err.to_string(),
+                        )
+                        .await;
                         set_run_failed(run, &err);
                         return Err(err);
                     }
                 };
+                store_once(&store, entry_id, &output);
                 run.mark_block_completed(entry_id);
                 run.set_state(RunState::Completed);
                 log_run_succeeded(&run_ctx);
@@ -960,10 +1201,19 @@ pub async fn run_workflow(
                     1,
                     block,
                     input,
+                    store.clone(),
                 ) {
                     Ok(r) => r,
                     Err(err) => {
-                        run_error_handlers(def, run, registry, entry_id, &err.to_string()).await;
+                        run_error_handlers(
+                            def,
+                            run,
+                            registry,
+                            store.clone(),
+                            entry_id,
+                            &err.to_string(),
+                        )
+                        .await;
                         let runtime_err = RuntimeError::Block(err);
                         set_run_failed(run, &runtime_err);
                         return Err(runtime_err);
@@ -976,6 +1226,7 @@ pub async fn run_workflow(
                         return Err(err);
                     }
                 };
+                store_once(&store, entry_id, &output);
                 run.mark_block_completed(entry_id);
                 run.set_state(RunState::Completed);
                 log_run_succeeded(&run_ctx);
@@ -1029,13 +1280,21 @@ pub async fn run_workflow(
                         node_def.config.block_type(),
                         registry,
                         input,
+                        store.clone(),
                     )
                     .await
                     {
                         Ok(out) => BlockExecutionResult::Once(out),
                         Err(err) => {
-                            run_error_handlers(def, run, registry, entry_id, &err.to_string())
-                                .await;
+                            run_error_handlers(
+                                def,
+                                run,
+                                registry,
+                                store.clone(),
+                                entry_id,
+                                &err.to_string(),
+                            )
+                            .await;
                             set_run_failed(run, &err);
                             return Err(err);
                         }
@@ -1058,11 +1317,19 @@ pub async fn run_workflow(
                         1,
                         block,
                         input,
+                        store.clone(),
                     ) {
                         Ok(r) => r,
                         Err(err) => {
-                            run_error_handlers(def, run, registry, entry_id, &err.to_string())
-                                .await;
+                            run_error_handlers(
+                                def,
+                                run,
+                                registry,
+                                store.clone(),
+                                entry_id,
+                                &err.to_string(),
+                            )
+                            .await;
                             let runtime_err = RuntimeError::Block(err);
                             set_run_failed(run, &runtime_err);
                             return Err(runtime_err);
@@ -1077,18 +1344,20 @@ pub async fn run_workflow(
 
             match result {
                 BlockExecutionResult::Once(o) => {
+                    store_once(&store, entry_id, &o);
                     outputs.insert(entry_id, o);
                     run.mark_block_completed(entry_id);
-                    let sink_output = match run_remaining_levels(
+                    let sink_output = match run_remaining_levels(RemainingLevelsContext {
                         def,
                         run,
                         registry,
-                        &run_ctx,
+                        run_ctx: &run_ctx,
+                        store: store.clone(),
                         sink_id,
-                        remaining_levels,
-                        &mut outputs,
-                        &mut multi_outputs,
-                    )
+                        levels: remaining_levels,
+                        outputs: &mut outputs,
+                        multi_outputs: &mut multi_outputs,
+                    })
                     .await
                     {
                         Ok(o) => o,
@@ -1110,18 +1379,20 @@ pub async fn run_workflow(
                         block_id = %entry_id
                     );
                     while let Some(o) = rx.recv().await {
+                        store_once(&store, entry_id, &o);
                         outputs.insert(entry_id, o);
                         run.mark_block_completed(entry_id);
-                        let sink_output = match run_remaining_levels(
+                        let sink_output = match run_remaining_levels(RemainingLevelsContext {
                             def,
                             run,
                             registry,
-                            &run_ctx,
+                            run_ctx: &run_ctx,
+                            store: store.clone(),
                             sink_id,
-                            remaining_levels,
-                            &mut outputs,
-                            &mut multi_outputs,
-                        )
+                            levels: remaining_levels,
+                            outputs: &mut outputs,
+                            multi_outputs: &mut multi_outputs,
+                        })
                         .await
                         {
                             Ok(out) => out,
@@ -1165,8 +1436,16 @@ pub async fn run_workflow(
                 reachable_count = reachable.len() as u64,
                 iteration_budget = ITERATION_BUDGET
             );
-            let out =
-                run_workflow_iteration(def, run, registry, &run_ctx, sink_id, entry_input).await;
+            let out = run_workflow_iteration(
+                def,
+                run,
+                registry,
+                &run_ctx,
+                store.clone(),
+                sink_id,
+                entry_input,
+            )
+            .await;
             match &out {
                 Ok(_) => log_run_succeeded(&run_ctx),
                 Err(err) => set_run_failed(run, err),
@@ -1176,18 +1455,34 @@ pub async fn run_workflow(
     }
 }
 
+struct RemainingLevelsContext<'a> {
+    def: &'a WorkflowDefinition,
+    run: &'a mut WorkflowRun,
+    registry: &'a BlockRegistry,
+    run_ctx: &'a RunLogContext,
+    store: SharedRunStore,
+    sink_id: Uuid,
+    levels: &'a [Vec<Uuid>],
+    outputs: &'a mut HashMap<Uuid, BlockOutput>,
+    multi_outputs: &'a mut MultiOutputs,
+}
+
 /// Run levels from a slice (non-entry levels). Returns the sink output if any.
 /// When a block returns Multiple, outputs are stored in multi_outputs and mapped to successors by edge order.
 async fn run_remaining_levels(
-    def: &WorkflowDefinition,
-    run: &mut WorkflowRun,
-    registry: &BlockRegistry,
-    run_ctx: &RunLogContext,
-    sink_id: Uuid,
-    levels: &[Vec<Uuid>],
-    outputs: &mut HashMap<Uuid, BlockOutput>,
-    multi_outputs: &mut MultiOutputs,
+    ctx: RemainingLevelsContext<'_>,
 ) -> Result<BlockOutput, RuntimeError> {
+    let RemainingLevelsContext {
+        def,
+        run,
+        registry,
+        run_ctx,
+        store,
+        sink_id,
+        levels,
+        outputs,
+        multi_outputs,
+    } = ctx;
     let nodes = def.nodes();
     let mut last_completed_id: Option<Uuid> = None;
     for (level_idx, level_nodes) in levels.iter().enumerate() {
@@ -1213,16 +1508,18 @@ async fn run_remaining_levels(
                     node_def.config.block_type(),
                     registry,
                     input,
+                    store.clone(),
                 )
                 .await
                 {
                     Ok(out) => out,
                     Err(e) => {
                         let msg = e.to_string();
-                        run_error_handlers(def, run, registry, *node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), *node_id, &msg).await;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 };
+                store_once(&store, *node_id, &output);
                 outputs.insert(*node_id, output);
                 run.mark_block_completed(*node_id);
                 last_completed_id = Some(*node_id);
@@ -1236,6 +1533,7 @@ async fn run_remaining_levels(
                     1,
                     block,
                     input,
+                    store.clone(),
                 );
                 joins.push((*node_id, Some(join_handle)));
             }
@@ -1246,18 +1544,19 @@ async fn run_remaining_levels(
                     Ok(Ok(result)) => result,
                     Ok(Err(err)) => {
                         let msg = err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(err));
                     }
                     Err(e) => {
                         let block_err = BlockError::Other(e.to_string());
                         let msg = block_err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(block_err));
                     }
                 };
                 match result {
                     BlockExecutionResult::Once(o) => {
+                        store_once(&store, node_id, &o);
                         outputs.insert(node_id, o);
                         run.mark_block_completed(node_id);
                         last_completed_id = Some(node_id);
@@ -1272,6 +1571,7 @@ async fn run_remaining_levels(
                             output_count = outs.len() as u64,
                             successor_count = succs.len() as u64
                         );
+                        store_multiple(&store, node_id, &outs);
                         let list: Vec<(Uuid, BlockOutput)> =
                             succs.into_iter().zip(outs.into_iter()).collect();
                         multi_outputs.insert(node_id, list);
@@ -1280,7 +1580,7 @@ async fn run_remaining_levels(
                     }
                     BlockExecutionResult::Recurring(_) => {
                         let msg = "Recurring only supported for entry block".to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 }
@@ -1307,6 +1607,7 @@ async fn run_workflow_iteration(
     run: &mut WorkflowRun,
     registry: &BlockRegistry,
     run_ctx: &RunLogContext,
+    store: SharedRunStore,
     sink_id: Uuid,
     mut entry_input: Option<BlockInput>,
 ) -> Result<BlockOutput, RuntimeError> {
@@ -1364,16 +1665,18 @@ async fn run_workflow_iteration(
                     node_def.config.block_type(),
                     registry,
                     input,
+                    store.clone(),
                 )
                 .await
                 {
                     Ok(out) => out,
                     Err(e) => {
                         let msg = e.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(BlockError::Other(msg)));
                     }
                 };
+                store_once(&store, node_id, &output);
                 outputs.insert(node_id, output);
                 run.mark_block_completed(node_id);
                 last_completed_id = Some(node_id);
@@ -1382,7 +1685,7 @@ async fn run_workflow_iteration(
                     Ok(b) => b,
                     Err(err) => {
                         let msg = err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(err));
                     }
                 };
@@ -1393,19 +1696,20 @@ async fn run_workflow_iteration(
                     1,
                     block,
                     input,
+                    store.clone(),
                 )
                 .await
                 {
                     Ok(Ok(r)) => r,
                     Ok(Err(err)) => {
                         let msg = err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(err));
                     }
                     Err(e) => {
                         let block_err = BlockError::Other(e.to_string());
                         let msg = block_err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(RuntimeError::Block(block_err));
                     }
                 };
@@ -1413,10 +1717,11 @@ async fn run_workflow_iteration(
                     Ok(out) => out,
                     Err(err) => {
                         let msg = err.to_string();
-                        run_error_handlers(def, run, registry, node_id, &msg).await;
+                        run_error_handlers(def, run, registry, store.clone(), node_id, &msg).await;
                         return Err(err);
                     }
                 };
+                store_once(&store, node_id, &output);
                 outputs.insert(node_id, output);
                 run.mark_block_completed(node_id);
                 last_completed_id = Some(node_id);

@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::resolve_effective_input;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind,
 };
 
 /// Error from markdown rendering.
@@ -32,6 +34,7 @@ pub struct MarkdownToHtmlConfig;
 pub struct MarkdownToHtmlBlock {
     _config: MarkdownToHtmlConfig,
     renderer: Arc<dyn MarkdownToHtml>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl MarkdownToHtmlBlock {
@@ -39,7 +42,13 @@ impl MarkdownToHtmlBlock {
         Self {
             _config: config,
             renderer,
+            input_from: Box::new([]),
         }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
@@ -66,7 +75,8 @@ fn input_to_string(input: &BlockInput) -> Result<String, BlockError> {
 }
 
 impl BlockExecutor for MarkdownToHtmlBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let md = input_to_string(&input)?;
         let html = self
             .renderer
@@ -75,6 +85,10 @@ impl BlockExecutor for MarkdownToHtmlBlock {
         Ok(BlockExecutionResult::Once(BlockOutput::Text {
             value: html,
         }))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Text, OutputMode::Once)
     }
 }
 
@@ -96,13 +110,24 @@ pub fn register_markdown_to_html(
     renderer: Arc<dyn MarkdownToHtml>,
 ) {
     let renderer = Arc::clone(&renderer);
-    registry.register_custom("markdown_to_html", move |payload| {
+    registry.register_custom("markdown_to_html", move |payload, input_from| {
         let config: MarkdownToHtmlConfig = serde_json::from_value(payload).unwrap_or_default();
-        Ok(Box::new(MarkdownToHtmlBlock::new(
-            config,
-            Arc::clone(&renderer),
-        )))
+        Ok(Box::new(
+            MarkdownToHtmlBlock::new(config, Arc::clone(&renderer)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +145,7 @@ mod tests {
     fn markdown_to_html_renders_content() {
         let block = MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(TestRenderer));
         let input = BlockInput::String("<script>".into());
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
                 assert_eq!(value, "&lt;script&gt;");
@@ -132,7 +157,7 @@ mod tests {
     #[test]
     fn markdown_to_html_empty_input_returns_empty() {
         let block = MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(TestRenderer));
-        let result = block.execute(BlockInput::empty()).unwrap();
+        let result = block.execute(test_ctx(BlockInput::empty())).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => assert_eq!(value, ""),
             _ => panic!("expected Once(Text)"),
@@ -145,7 +170,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream error".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream error"));
     }
@@ -155,7 +180,7 @@ mod tests {
         let block =
             MarkdownToHtmlBlock::new(MarkdownToHtmlConfig, Arc::new(PulldownMarkdownRenderer));
         let input = BlockInput::String("# Hi\n**bold**".into());
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
                 assert!(value.contains("<h1>") && value.contains("Hi"));

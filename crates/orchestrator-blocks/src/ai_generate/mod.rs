@@ -9,9 +9,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use crate::input_binding::{resolve_effective_input, validate_expected_input};
 use orchestrator_core::RetryPolicy;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKind, ValueKindSet,
 };
 
 /// Error from AI generation.
@@ -39,7 +41,8 @@ pub trait AiGenerator: Send + Sync {
 pub struct AiGenerateConfig {
     pub provider: String,
     pub model: String,
-    pub prompt: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
     #[serde(default)]
@@ -57,7 +60,7 @@ impl AiGenerateConfig {
         Self {
             provider: "openai".to_string(),
             model: "gpt-5-nano".to_string(),
-            prompt: prompt.into(),
+            prompt: Some(prompt.into()),
             api_key_env: default_api_key_env(),
             timeout_ms: Some(120_000),
             retry_policy: default_retry_policy(),
@@ -72,11 +75,21 @@ fn default_retry_policy() -> RetryPolicy {
 pub struct AiGenerateBlock {
     config: AiGenerateConfig,
     generator: Arc<dyn AiGenerator>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl AiGenerateBlock {
     pub fn new(config: AiGenerateConfig, generator: Arc<dyn AiGenerator>) -> Self {
-        Self { config, generator }
+        Self {
+            config,
+            generator,
+            input_from: Box::new([]),
+        }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
@@ -103,29 +116,101 @@ fn json_shape(value: &serde_json::Value) -> (&'static str, u64) {
     }
 }
 
-impl BlockExecutor for AiGenerateBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
-        if self.config.prompt.trim().is_empty() {
-            return Err(BlockError::Other(
-                "ai_generate prompt is required in block config".into(),
-            ));
+fn prompt_from_input(input: &BlockInput) -> Option<String> {
+    match input {
+        BlockInput::String(s) => Some(s.clone()),
+        BlockInput::Text(s) => Some(s.clone()),
+        BlockInput::Json(v) => v
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| v.as_str().map(String::from)),
+        BlockInput::Multi { outputs } => outputs
+            .first()
+            .and_then(|o| Option::<String>::from(o.clone())),
+        _ => None,
+    }
+}
+
+fn payload_from_input(input: &BlockInput, prompt_from_input_mode: bool) -> serde_json::Value {
+    match input {
+        BlockInput::Json(v) => {
+            if prompt_from_input_mode {
+                if let Some(obj) = v.as_object() {
+                    let mut stripped = obj.clone();
+                    stripped.remove("prompt");
+                    serde_json::Value::Object(stripped)
+                } else {
+                    serde_json::json!({})
+                }
+            } else {
+                v.clone()
+            }
         }
+        BlockInput::String(s) => {
+            if prompt_from_input_mode {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "input": s })
+            }
+        }
+        BlockInput::Text(s) => {
+            if prompt_from_input_mode {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "input": s })
+            }
+        }
+        BlockInput::List { items } => serde_json::json!({ "items": items }),
+        BlockInput::Multi { outputs } => serde_json::json!({
+            "outputs": outputs.iter().map(output_to_value).collect::<Vec<_>>()
+        }),
+        BlockInput::Empty => serde_json::json!({}),
+        BlockInput::Error { .. } => serde_json::json!({}),
+    }
+}
+
+impl BlockExecutor for AiGenerateBlock {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         if let BlockInput::Error { message } = &input {
             return Err(BlockError::Other(message.clone()));
         }
 
-        let input_kind = block_input_kind(&input);
-        let payload = match input {
-            BlockInput::Json(v) => v,
-            BlockInput::String(s) => serde_json::json!({ "input": s }),
-            BlockInput::Text(s) => serde_json::json!({ "input": s }),
-            BlockInput::List { items } => serde_json::json!({ "items": items }),
-            BlockInput::Multi { outputs } => serde_json::json!({
-                "outputs": outputs.iter().map(output_to_value).collect::<Vec<_>>()
-            }),
-            BlockInput::Empty => serde_json::json!({}),
-            BlockInput::Error { .. } => unreachable!(),
+        let forced_mode = !self.input_from.is_empty();
+        let configured_prompt = self
+            .config
+            .prompt
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let prompt_from_input_mode = forced_mode || configured_prompt.is_none();
+        let prompt = if prompt_from_input_mode {
+            prompt_from_input(&input).ok_or_else(|| {
+                if forced_mode {
+                    BlockError::Other(
+                        "ai_generate prompt required from forced input sources".into(),
+                    )
+                } else {
+                    BlockError::Other(
+                        "ai_generate prompt required from config or previous input".into(),
+                    )
+                }
+            })?
+        } else {
+            configured_prompt.unwrap_or_default()
         };
+        if prompt.trim().is_empty() {
+            return Err(BlockError::Other(
+                "ai_generate prompt must not be empty".into(),
+            ));
+        }
+
+        let input_kind = block_input_kind(&input);
+        let payload = payload_from_input(&input, prompt_from_input_mode);
+        let mut request_config = self.config.clone();
+        request_config.prompt = Some(prompt.clone());
         let (payload_kind, payload_units) = json_shape(&payload);
         debug!(
             event = "ai.generate_configured",
@@ -134,11 +219,11 @@ impl BlockExecutor for AiGenerateBlock {
             input_kind = input_kind,
             provider = self.config.provider.as_str(),
             model = self.config.model.as_str(),
-            prompt_len = self.config.prompt.len() as u64,
+            prompt_len = prompt.len() as u64,
             payload_kind = payload_kind,
             payload_units = payload_units,
-            timeout_ms = ?self.config.timeout_ms,
-            max_retries = self.config.retry_policy.max_retries
+            timeout_ms = ?request_config.timeout_ms,
+            max_retries = request_config.retry_policy.max_retries
         );
 
         let mut retries_done = 0u32;
@@ -152,7 +237,7 @@ impl BlockExecutor for AiGenerateBlock {
                 provider = self.config.provider.as_str(),
                 model = self.config.model.as_str()
             );
-            match self.generator.generate_markdown(&self.config, &payload) {
+            match self.generator.generate_markdown(&request_config, &payload) {
                 Ok(markdown) => {
                     debug!(
                         event = "ai.generate_succeeded",
@@ -167,7 +252,8 @@ impl BlockExecutor for AiGenerateBlock {
                 }
                 Err(err) => {
                     let (code, retryable, provider_status) = classify_ai_error(&err.0);
-                    let can_retry = retryable && self.config.retry_policy.can_retry(retries_done);
+                    let can_retry =
+                        retryable && request_config.retry_policy.can_retry(retries_done);
                     debug!(
                         event = "ai.generate_failed",
                         domain = "ai",
@@ -181,7 +267,7 @@ impl BlockExecutor for AiGenerateBlock {
                         error_len = err.0.len() as u64
                     );
                     if can_retry {
-                        let backoff = self.config.retry_policy.backoff_duration(retries_done);
+                        let backoff = request_config.retry_policy.backoff_duration(retries_done);
                         info!(
                             event = "block.retry_scheduled",
                             domain = "ai",
@@ -212,6 +298,22 @@ impl BlockExecutor for AiGenerateBlock {
                 }
             }
         }
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract::from_kind(ValueKind::Text, OutputMode::Once)
+    }
+
+    fn validate_linkage(&self, ctx: &ValidateContext<'_>) -> Result<(), BlockError> {
+        if !self.input_from.is_empty() || self.config.prompt.is_none() {
+            return validate_expected_input(
+                ctx,
+                ValueKindSet::singleton(ValueKind::String)
+                    | ValueKindSet::singleton(ValueKind::Text)
+                    | ValueKindSet::singleton(ValueKind::Json),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -301,14 +403,25 @@ pub fn register_ai_generate(
     generator: Arc<dyn AiGenerator>,
 ) {
     let generator = Arc::clone(&generator);
-    registry.register_custom("ai_generate", move |payload| {
+    registry.register_custom("ai_generate", move |payload, input_from| {
         let config: AiGenerateConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(AiGenerateBlock::new(
-            config,
-            Arc::clone(&generator),
-        )))
+        Ok(Box::new(
+            AiGenerateBlock::new(config, Arc::clone(&generator)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -325,7 +438,7 @@ mod tests {
         ) -> Result<String, AiGenerateError> {
             Ok(format!(
                 "# {}\n{}",
-                config.prompt,
+                config.prompt.clone().unwrap_or_default(),
                 input
                     .get("topic")
                     .and_then(|v| v.as_str())
@@ -339,7 +452,9 @@ mod tests {
         let block =
             AiGenerateBlock::new(AiGenerateConfig::new("Summarize"), Arc::new(FakeGenerator));
         let out = block
-            .execute(BlockInput::Json(serde_json::json!({"topic":"rust"})))
+            .execute(test_ctx(BlockInput::Json(
+                serde_json::json!({"topic":"rust"}),
+            )))
             .unwrap();
         match out {
             BlockExecutionResult::Once(BlockOutput::Text { value }) => {
@@ -353,10 +468,61 @@ mod tests {
     #[test]
     fn ai_generate_empty_prompt_returns_error() {
         let mut config = AiGenerateConfig::new("");
-        config.prompt = "   ".to_string();
+        config.prompt = Some("   ".to_string());
         let block = AiGenerateBlock::new(config, Arc::new(FakeGenerator));
-        let err = block.execute(BlockInput::Json(serde_json::json!({})));
+        let err = block.execute(test_ctx(BlockInput::Json(serde_json::json!({}))));
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("prompt is required"));
+        assert!(err.unwrap_err().to_string().contains("prompt"));
+    }
+
+    #[test]
+    fn ai_generate_precedence_config_over_prev_prompt() {
+        let block = AiGenerateBlock::new(
+            AiGenerateConfig::new("from-config"),
+            Arc::new(FakeGenerator),
+        );
+        let out = block
+            .execute(test_ctx(BlockInput::Json(
+                serde_json::json!({"prompt":"from-prev","topic":"rust"}),
+            )))
+            .unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert!(value.contains("from-config"));
+                assert!(!value.contains("from-prev"));
+            }
+            _ => panic!("expected Once(Text)"),
+        }
+    }
+
+    #[test]
+    fn ai_generate_precedence_forced_over_config() {
+        let source_id = uuid::Uuid::new_v4();
+        let ctx = test_ctx(BlockInput::Json(serde_json::json!({
+            "prompt":"from-prev",
+            "topic":"rust"
+        })));
+        ctx.store.insert(
+            source_id,
+            orchestrator_core::block::StoredOutput::Once(Arc::new(BlockOutput::Json {
+                value: serde_json::json!({
+                    "prompt":"from-forced",
+                    "topic":"rust"
+                }),
+            })),
+        );
+        let block = AiGenerateBlock::new(
+            AiGenerateConfig::new("from-config"),
+            Arc::new(FakeGenerator),
+        )
+        .with_input_from(vec![source_id].into_boxed_slice());
+        let out = block.execute(ctx).unwrap();
+        match out {
+            BlockExecutionResult::Once(BlockOutput::Text { value }) => {
+                assert!(value.contains("from-forced"));
+                assert!(!value.contains("from-config"));
+            }
+            _ => panic!("expected Once(Text)"),
+        }
     }
 }

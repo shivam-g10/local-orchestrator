@@ -19,6 +19,7 @@ mod custom_transform;
 mod file_read;
 mod file_write;
 mod http_request;
+mod input_binding;
 mod list_directory;
 mod markdown_to_html;
 mod rss_parse;
@@ -147,6 +148,7 @@ mod tests {
                 "to": "user@example.com",
                 "subject": "hello"
             }),
+            input_from: Box::new([]),
         };
         assert!(r.get(&cfg).is_ok());
     }

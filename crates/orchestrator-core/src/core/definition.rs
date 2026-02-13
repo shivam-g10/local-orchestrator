@@ -66,6 +66,7 @@ mod tests {
                     config: BlockConfig::Custom {
                         type_id: "file_read".to_string(),
                         payload: json!({ "path": "README.md" }),
+                        input_from: Box::new([]),
                     },
                 },
             )]),

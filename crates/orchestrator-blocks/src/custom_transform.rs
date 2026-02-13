@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::input_binding::resolve_effective_input;
 use orchestrator_core::block::{
-    BlockError, BlockExecutionResult, BlockExecutor, BlockInput, BlockOutput,
+    BlockError, BlockExecutionContext, BlockExecutionResult, BlockExecutor, BlockInput,
+    BlockOutput, OutputContract, OutputMode, ValidateContext, ValueKindSet,
 };
 
 /// Error from custom transform operations.
@@ -42,6 +44,7 @@ impl CustomTransformConfig {
 pub struct CustomTransformBlock {
     _config: CustomTransformConfig,
     transform: Arc<dyn Transform>,
+    input_from: Box<[uuid::Uuid]>,
 }
 
 impl CustomTransformBlock {
@@ -49,17 +52,31 @@ impl CustomTransformBlock {
         Self {
             _config: config,
             transform,
+            input_from: Box::new([]),
         }
+    }
+
+    pub fn with_input_from(mut self, input_from: Box<[uuid::Uuid]>) -> Self {
+        self.input_from = input_from;
+        self
     }
 }
 
 impl BlockExecutor for CustomTransformBlock {
-    fn execute(&self, input: BlockInput) -> Result<BlockExecutionResult, BlockError> {
+    fn execute(&self, ctx: BlockExecutionContext) -> Result<BlockExecutionResult, BlockError> {
+        let input = resolve_effective_input(&ctx, &self.input_from, None)?;
         let output = self
             .transform
             .transform(input)
             .map_err(|e| BlockError::Other(e.0))?;
         Ok(BlockExecutionResult::Once(output))
+    }
+
+    fn infer_output_contract(&self, _ctx: &ValidateContext<'_>) -> OutputContract {
+        OutputContract {
+            kinds: ValueKindSet::ANY,
+            mode: OutputMode::Once,
+        }
     }
 }
 
@@ -89,14 +106,25 @@ pub fn register_custom_transform(
     transform: Arc<dyn Transform>,
 ) {
     let transform = Arc::clone(&transform);
-    registry.register_custom("custom_transform", move |payload| {
+    registry.register_custom("custom_transform", move |payload, input_from| {
         let config: CustomTransformConfig =
             serde_json::from_value(payload).map_err(|e| BlockError::Other(e.to_string()))?;
-        Ok(Box::new(CustomTransformBlock::new(
-            config,
-            Arc::clone(&transform),
-        )))
+        Ok(Box::new(
+            CustomTransformBlock::new(config, Arc::clone(&transform)).with_input_from(input_from),
+        ))
     });
+}
+
+#[cfg(test)]
+fn test_ctx(input: BlockInput) -> BlockExecutionContext {
+    BlockExecutionContext {
+        workflow_id: uuid::Uuid::new_v4(),
+        run_id: uuid::Uuid::new_v4(),
+        block_id: uuid::Uuid::new_v4(),
+        attempt: 1,
+        prev: input,
+        store: Default::default(),
+    }
 }
 
 #[cfg(test)]
@@ -108,7 +136,7 @@ mod tests {
         let config = CustomTransformConfig::new(None::<String>);
         let block = CustomTransformBlock::new(config, Arc::new(IdentityTransform));
         let input = BlockInput::String("hello".into());
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::String { value }) => assert_eq!(value, "hello"),
             _ => panic!("expected Once(String)"),
@@ -120,7 +148,7 @@ mod tests {
         let config = CustomTransformConfig::new(None::<String>);
         let block = CustomTransformBlock::new(config, Arc::new(IdentityTransform));
         let input = BlockInput::Json(serde_json::json!({"a": 1}));
-        let result = block.execute(input).unwrap();
+        let result = block.execute(test_ctx(input)).unwrap();
         match result {
             BlockExecutionResult::Once(BlockOutput::Json { value }) => {
                 assert_eq!(value.get("a"), Some(&serde_json::json!(1)));
@@ -136,7 +164,7 @@ mod tests {
         let input = BlockInput::Error {
             message: "upstream failed".into(),
         };
-        let err = block.execute(input);
+        let err = block.execute(test_ctx(input));
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("upstream failed"));
     }
