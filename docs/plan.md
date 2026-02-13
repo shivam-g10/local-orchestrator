@@ -8,6 +8,12 @@ todos:
   - id: block-sdk-samples
     content: Block SDK + example workflows + runner
     status: pending
+  - id: block-extensibility
+    content: Dynamic block plugins (.so/.dylib/.dll) + SDK/tooling
+    status: pending
+  - id: ai-harness
+    content: Provider abstraction, usage tracking, evals
+    status: pending
   - id: eventing-logging
     content: Event bus + structured logs + subscribers
     status: pending
@@ -16,9 +22,6 @@ todos:
     status: pending
   - id: persistence-yaml
     content: SQLite store + YAML import/export + versions
-    status: pending
-  - id: ai-harness
-    content: Provider abstraction, usage tracking, evals
     status: pending
   - id: undo
     content: Undo system for blocks and runs
@@ -98,61 +101,71 @@ How the runtime chooses which block’s output to return as the workflow result 
 - Add a minimal sample runner/CLI for `cargo run` to execute sample workflows using the `Workflow`/`Block` API.
 - Demo: add a new custom block in <30 minutes and run a sample workflow using it.
 
-## Phase 3: AI harness upgrades
+## Phase 3: Block extensibility (dynamic plugins)
+
+- Design a stable plugin boundary for custom blocks loaded from `.so`/`.dylib`/`.dll` at runtime.
+- Define a versioned plugin contract: ABI version, block metadata, config schema, input/output schema, and typed error schema.
+- Add a plugin host/loader in core (`libloading` + OS-specific extension resolution), registry integration, and lifecycle rules.
+- Provide plugin SDK crates so plugin authors implement ergonomic Rust traits while exposing a stable host-facing interface.
+- Add tooling and templates for `plugin init`, `plugin build`, `plugin validate`, and `plugin package` with cross-platform build guidance.
+- Add safety guardrails: compatibility checks, explicit trust/allowlist policy, panic isolation, and deterministic error translation.
+- Demo: compile a sample plugin block as a shared library, load it at runtime, and run a workflow without recompiling orchestrator core.
+
+## Phase 4: AI harness upgrades
 
 - Add provider abstraction and model config; move OpenAI specifics behind a trait (see `poc/src/block/ai/` for reference).
 - Add token usage tracking, cost budgets, eval mode, and tool-provider switching.
 - Allow external subscriptions to AI events (prompt, response, tool call, cost).
 - Demo: AI workflow that switches models and respects a cost budget.
 
-## Phase 4: Eventing + logging
+## Phase 5: Eventing + logging
 
 - Introduce `RunEvent`/`BlockEvent` bus with subscriptions; wire into engine and blocks.
 - Expand logger to structured logs (see `poc/src/logger.rs` for reference) (JSON + file rotation) and link to the event bus.
 - Add diagnostics helpers and trace correlation IDs per run.
 - Demo: stream events to console + log file and show per-block timings.
 
-## Phase 5: Robust runs
+## Phase 6: Robust runs
 
 - Add retry policies, timeouts, failure classification, and idempotency keys.
 - Implement pause/resume/cancel and partial restart (by block or checkpoint).
 - Add run metrics and failure reporting.
 - Demo: a flaky block retries, then a paused run resumes from last checkpoint.
 
-## Phase 6: Persistence + YAML
+## Phase 7: Persistence + YAML
 
 - Add local store (SQLite) for workflows, versions, runs, and logs; include migrations.
 - YAML import/export for versioned workflows and block configs.
 - Point-in-time restart from persisted run checkpoints.
 - Demo: import YAML, run it, then list run history and replay from a checkpoint.
 
-## Phase 7: Undo system
+## Phase 8: Undo system
 
 - Define `UndoAction` per block and record side effects at run time.
 - Implement run-level undo and undo-to-block for a run.
 - Demo: file write workflow undone to the previous state.
 
-## Phase 8: Daemon API (optional)
+## Phase 9: Daemon API (optional)
 
 - Implement local daemon API for workflow CRUD, run control, logs, and replay.
 - Keep embedded API for Tauri via feature flags to reuse the same core engine.
 - Demo: start daemon, run a workflow via CLI, and tail live events.
 
-## Phase 9: Web UI (Next.js static)
+## Phase 10: Web UI (Next.js static)
 
 - Build a workflow canvas editor (React Flow), block library, detail editor.
 - Load/save YAML; validate and visualize graph; download YAML.
 - Provide a minimal "run locally" panel for debugging against the daemon.
 - Demo: create a workflow in UI, run it locally, and view live logs.
 
-## Phase 10: Desktop (Tauri) + monitoring
+## Phase 11: Desktop (Tauri) + monitoring
 
 - Integrate the web UI in Tauri and connect to daemon or embedded mode.
 - Add workflow list and run controls (play/pause/resume/stop).
 - Add monitoring: run logs, block-level logs, replay.
 - Demo: desktop app runs a workflow and shows a block timeline.
 
-## Phase 11: Delivery + testing + performance
+## Phase 12: Delivery + testing + performance
 
 - Package installers and improve onboarding across OSs.
 - Unit/integration tests for engine, blocks, and storage; E2E tests for UI.
