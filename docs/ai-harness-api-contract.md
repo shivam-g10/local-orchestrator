@@ -30,11 +30,11 @@ Define a production-grade, consumer-friendly Rust SDK contract for an AI harness
 ### Assumption ledger
 - `A1`: Consumers want one high-level `Harness` API with optional deep controls.
 - `A2`: Capability negotiation is mandatory for safe multi-provider routing.
-- `A3`: Evals must be integrated into runtime decisions (shadow + blocking).
+- `A3`: Evals must be integrated into runtime decisions (shadow + enforcement).
 - `A4`: MCP is a first-class integration path, not an afterthought.
 
 ### Decision delta (V2, contract-affecting)
-- `D1`: Responsibilities are split into three layers: `Kernel` (must be in harness core), `Extensions` (first-party optional modules), and `Wrappers` (UX/workflow layers over control-plane APIs).
+- `D1`: Responsibilities are split into three layers: `Kernel` (must be in harness core), `Extensions` (first-party optional modules), and `Wrappers` (UX/interaction layers over control-plane APIs).
 - `D2`: `Todos`, `approvals`, and high-level `steering UX` move out of core kernel and are modeled as wrapper responsibilities over core interrupt/command primitives.
 - `D3`: Add first-class change journal and explicit undo/compensation APIs to avoid ambiguity between replay and true undo.
 - `D4`: Keep performance-critical concerns (`streaming`, `backpressure`, `retry`, `timeouts`, `capability negotiation`, `zero-copy buffers`) in kernel.
@@ -49,7 +49,7 @@ Define a production-grade, consumer-friendly Rust SDK contract for an AI harness
 | Project / Platform | What it proves | Relevance to this SDK |
 |---|---|---|
 | [badlogic/pi-mono](https://github.com/badlogic/pi-mono/) | Integrated agent toolkit: unified multi-provider API, agent runtime, tool/state support | Closest conceptual reference for full harness scope |
-| [rig.rs](https://github.com/0xPlaygrounds/rig) | Rust-first agentic workflows, streaming, semantic-convention alignment | Strong Rust ergonomics + composability patterns |
+| [rig.rs](https://github.com/0xPlaygrounds/rig) | Rust-first agentic runtimes, streaming, semantic-convention alignment | Strong Rust ergonomics + composability patterns |
 | [LiteLLM](https://docs.litellm.ai/) | Unified multi-provider model API, retries/fallbacks/router patterns | Routing/fallback architecture ideas |
 | [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection) | Provider ordering, fallback behavior, capability/parameter constraints (`require_parameters`) | Capability-aware fallback plans |
 | [OpenAI Responses/Streaming](https://platform.openai.com/docs/guides/streaming-responses) | Typed streaming events, tool-call event model, multimodal/tool primitives | Event normalization model |
@@ -90,9 +90,10 @@ Define a production-grade, consumer-friendly Rust SDK contract for an AI harness
 | Inference | Why it follows | Risk |
 |---|---|---|
 | We need event normalization independent of provider SDKs | Provider event models differ and evolve quickly | Low |
+| We also need an opt-in raw streaming surface | Advanced consumers may need transport/frame-level handling for latency tuning and custom parsers | Medium |
 | A three-layer ownership model (kernel/extensions/wrappers) gives better long-term API stability | Core/runtime concerns and UX/policy concerns evolve at different rates | Low |
 | Tool execution should be runtime-pluggable with strict schema validation | Needed for custom tools + correctness + security | Low |
-| Eval gating must include shadow mode before hard block | Reduces false-positive production impact | Low |
+| Eval gating must include shadow mode before hard deny | Reduces false-positive production impact | Low |
 | Capability negotiation must happen on every run plan, not only startup | Provider/model capability drift is frequent | Medium |
 
 ### 3.3 Evidence gaps
@@ -137,7 +138,7 @@ pub mod compensation;      // undo contracts and compensating actions
 // - ai_harness_ext_evals
 // - ai_harness_ext_memory_sqlite / _vector
 //
-// Wrapper crates (product/workflow layer):
+// Wrapper crates (product/interaction layer):
 // - ai_harness_wrapper_agent_runtime (todos, approvals UX, steering UX)
 ```
 
@@ -229,6 +230,57 @@ pub struct FileRef {
     pub size_bytes: u64,
 }
 ```
+
+## 4.2.1 Streaming surface control (normalized by default, raw opt-in)
+
+```rust
+#[derive(Clone, Debug)]
+pub enum StreamSurface {
+    // Default: provider-specific events normalized into stable SDK events.
+    Normalized,
+    // Opt-in: raw provider transport frames/chunks for advanced control.
+    Raw(RawStreamConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct RawStreamConfig {
+    pub encoding: RawEncoding,
+    pub include_transport_headers: bool,
+    pub passthrough_provider_metadata: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum RawEncoding {
+    ServerSentEvents,
+    JsonLines,
+    HttpChunkedBytes,
+    WebSocketFrames,
+}
+
+#[derive(Clone, Debug)]
+pub struct RawStreamFrame {
+    pub provider: String,
+    pub model: String,
+    pub sequence: u64,
+    pub content_type: String,
+    pub payload: bytes::Bytes, // zero-copy payload buffer
+    pub terminal: bool,
+}
+
+impl RunBuilder {
+    pub fn stream_surface(self, surface: StreamSurface) -> Self;
+}
+
+impl RunHandle {
+    pub async fn next_event(&mut self) -> Option<Result<StreamEvent, HarnessError>>;
+    pub async fn next_raw_frame(&mut self) -> Option<Result<RawStreamFrame, HarnessError>>;
+}
+```
+
+Rules:
+- `StreamSurface::Normalized` is the default and recommended surface.
+- `StreamSurface::Raw` is opt-in and intentionally provider/transport-coupled.
+- Backpressure and global concurrency limits apply to both stream surfaces.
 
 ## 4.3 Tool API (custom logic input)
 
@@ -344,7 +396,7 @@ pub enum XrayEvent {
     ToolCallFinished { call_id: String, ok: bool, latency_ms: u64 },
     RetryScheduled { reason: String, backoff_ms: u64 },
     EvalShadowResult { gate: String, score: f64, passed: bool },
-    EvalBlockingResult { gate: String, score: f64, passed: bool },
+    EvalEnforcingResult { gate: String, score: f64, passed: bool },
     InterruptRaised { id: String, kind: InterruptKind },
     InterruptResolved { id: String },
     WrapperEvent { wrapper: String, kind: String, payload: serde_json::Value },
@@ -374,12 +426,12 @@ pub struct GateRule {
 #[derive(Clone, Debug)]
 pub enum GateMode {
     ShadowOnly,
-    Blocking,
+    Enforcing,
 }
 
 impl EvalEngine {
     pub async fn run_shadow(&self, run_id: &str) -> Result<EvalReport, EvalError>;
-    pub async fn run_blocking(&self, run_id: &str) -> Result<EvalReport, EvalError>;
+    pub async fn run_enforcing(&self, run_id: &str) -> Result<EvalReport, EvalError>;
 }
 ```
 
@@ -414,7 +466,7 @@ impl ControlHandle {
 #[derive(Clone, Debug)]
 pub struct TodoItem { pub id: String, pub title: String, pub status: TodoStatus, pub owner: String }
 #[derive(Clone, Debug)]
-pub enum TodoStatus { Pending, InProgress, Blocked, Done }
+pub enum TodoStatus { Pending, InProgress, WaitingOnExternal, Done }
 ```
 
 ## 4.9 Deterministic replay
@@ -532,7 +584,7 @@ async fn main() -> Result<(), HarnessError> {
         // 29: bounded backpressure controls
         .stream_backpressure(StreamBackpressure {
             max_buffered_events: 2048,
-            drop_policy: DropPolicy::BlockProducer,
+            drop_policy: DropPolicy::PauseProducer,
         })
 
         // 14: retries/timeouts/network anti-fragile behavior
@@ -545,7 +597,7 @@ async fn main() -> Result<(), HarnessError> {
             circuit_breaker: Some(CircuitBreakerConfig::default()),
         })
 
-        // 17, 18, 32: guardrails + PII blocking + sensitive trace controls
+        // 17, 18, 32: guardrails + PII enforcement + sensitive trace controls
         .guardrails(GuardrailPolicy::strict_default())
         .sensitive_data_policy(SensitiveDataPolicy {
             redact_pii_in_prompts: true,
@@ -574,11 +626,11 @@ async fn main() -> Result<(), HarnessError> {
         // 22: run evals
         .eval_engine(EvalEngine::with_local_runners())
 
-        // 23 + 33: output gates with shadow mode before blocking
+        // 23 + 33: output gates with shadow mode before enforcement
         .eval_gate(EvalGateConfig {
             rules: vec![
                 GateRule { name: "policy_safety".into(), min_score: 0.98, mode: GateMode::ShadowOnly },
-                GateRule { name: "factuality".into(), min_score: 0.90, mode: GateMode::Blocking },
+                GateRule { name: "factuality".into(), min_score: 0.90, mode: GateMode::Enforcing },
             ],
         })
 
@@ -673,6 +725,7 @@ async fn main() -> Result<(), HarnessError> {
 
         // 13: stream input/output
         .stream(true)
+        .stream_surface(StreamSurface::Normalized)
         .start()?;
 
     // 2 + 10 + 30: multimodal data + files + zero-copy media buffers
@@ -716,6 +769,27 @@ async fn main() -> Result<(), HarnessError> {
         }
     }
 
+    // optional advanced mode: low-level raw streaming surface
+    let mut raw_run = session
+        .run()
+        .model_plan(ModelPlan::fast_path())
+        .stream(true)
+        .stream_surface(StreamSurface::Raw(RawStreamConfig {
+            encoding: RawEncoding::ServerSentEvents,
+            include_transport_headers: true,
+            passthrough_provider_metadata: true,
+        }))
+        .start()?;
+
+    while let Some(frame) = raw_run.next_raw_frame().await {
+        let frame = frame?;
+        // consumer owns parsing/decoding strategy at this level
+        println!("raw frame #{} bytes={}", frame.sequence, frame.payload.len());
+        if frame.terminal {
+            break;
+        }
+    }
+
     // 20 + 21: collect + sample eval dataset
     let sample = harness
         .evals()
@@ -725,12 +799,12 @@ async fn main() -> Result<(), HarnessError> {
         })
         .await?;
 
-    // 22 + 23 + 33: run shadow, then blocking gates
+    // 22 + 23 + 33: run shadow, then enforcing gates
     let shadow_report = harness.evals().run_shadow_on_sample(&sample).await?;
     println!("shadow gate pass rate = {:.2}", shadow_report.pass_rate);
 
-    let blocking_report = harness.evals().run_blocking_on_sample(&sample).await?;
-    println!("blocking gate pass rate = {:.2}", blocking_report.pass_rate);
+    let enforcing_report = harness.evals().run_enforcing_on_sample(&sample).await?;
+    println!("enforcing gate pass rate = {:.2}", enforcing_report.pass_rate);
 
     // 27: retrieve replay token
     let replay = run.replay_token().await?;
@@ -779,12 +853,12 @@ Ownership key:
 | 10 | Send files | `K` | `InputPart::FileRef`, `OutputPart::FileRef` |
 | 11 | Multiple memory types | `E` | `MemoryStore` trait in kernel + extension stores |
 | 12 | Xray observability | `K` + `E` | `XrayEvent`/`XraySink` in kernel + exporters in extensions |
-| 13 | Streaming in/out | `K` | `stream(true)`, `next_event()` |
+| 13 | Streaming in/out | `K` | `stream(true)`, `stream_surface(...)`, `next_event()`, `next_raw_frame()` |
 | 14 | Retry/drop/timeout/network | `K` | `ReliabilityConfig` |
 | 15 | Support model capabilities | `K` | `Capability`, `ModelPlan.required_capabilities` |
 | 16 | Extensible providers/models | `K` | `register_provider`, `ProviderAdapter` |
 | 17 | Guardrails | `E` | `ai_harness_ext_guardrails` |
-| 18 | PII blocking | `E` | `SensitiveDataPolicy` + pluggable PII rule packs |
+| 18 | PII enforcement | `E` | `SensitiveDataPolicy` + pluggable PII rule packs |
 | 19 | MCP support | `E` | `ai_harness_ext_mcp` |
 | 20 | Collect eval datasets | `E` | `EvalDatasetCollector` extension |
 | 21 | Sample eval data | `E` | `sample_dataset(...)` extension |
@@ -795,7 +869,7 @@ Ownership key:
 | 26 | In-progress steering | `W` + `K` | Wrapper UX + kernel command channel |
 | 27 | Deterministic replay tokens | `K` | `ReplayToken`, `replay(...)` |
 | 28 | Capability/protocol checks | `K` | `strict_negotiation`, `ProtocolConstraints` |
-| 29 | Bounded backpressure | `K` | `StreamBackpressure` |
+| 29 | Bounded backpressure | `K` | `StreamBackpressure` (applies to normalized and raw surfaces) |
 | 30 | Zero-copy media buffers | `K` | `bytes::Bytes` in `InputPart`/`OutputPart` |
 | 31 | Global concurrency limits | `K` | `global_concurrency_limit(...)` |
 | 32 | Redaction trace controls | `K` + `E` | kernel toggles + extension policy packs |
@@ -823,7 +897,7 @@ Scores are for this proposed contract.
 | Observability | 9.6 | Xray event model + OTEL integration + change journal |
 | Robustness | 9.2 | Retries, budgets, circuit breaking, fallbacks, interrupts |
 | Error handling | 9.1 | Typed errors and category-driven routing |
-| Edge cases | 8.9 | Handles partial tool streams, capability mismatch, network failures, compensation flow |
+| Edge cases | 9.0 | Handles partial tool streams, capability mismatch, network failures, compensation flow, raw-stream fallback paths |
 | Internals exposure | 9.0 | Exposes control points without leaking policy internals |
 
 ### Residual weaknesses
@@ -894,17 +968,20 @@ flowchart LR
   B --> C["Context + Memory Assembly"]
   C --> D["Provider Request Pipeline"]
   D --> E["Streaming Event Normalizer"]
+  D --> R["Raw Stream Surface (Opt-in)"]
   E --> F["Tool Orchestrator"]
   F --> D
   E --> G["Guardrails + PII Filters"]
-  G --> H["Eval Shadow/Blocking Gates"]
+  G --> H["Eval Shadow/Enforcing Gates"]
   H --> I["Output Stream"]
+  R --> I
   E --> J["Xray Event Bus"]
   J --> K["OTEL / Logs / Dataset Collector"]
 ```
 
 Execution note:
-- `Guardrails + PII Filters`, `Eval Shadow/Blocking Gates`, and `Dataset Collector` are extension hook points bound into the kernel pipeline.
+- `Guardrails + PII Filters`, `Eval Shadow/Enforcing Gates`, and `Dataset Collector` are extension hook points bound into the kernel pipeline.
+- Raw stream mode can bypass normalizer transforms for consumers that need transport/frame-level control.
 
 ## 8.3 Provider adapter contract
 
@@ -921,7 +998,8 @@ pub trait ProviderAdapter: Send + Sync {
 ```
 
 Key internal rule:
-- All provider events are normalized into `StreamEvent`; consumer code never reads raw provider payloads.
+- Default path normalizes provider events into `StreamEvent`.
+- Opt-in raw path can expose provider transport frames directly when `StreamSurface::Raw` is selected.
 
 ## 8.4 Capability negotiation algorithm
 
@@ -934,12 +1012,16 @@ Key internal rule:
 ## 8.5 Streaming and backpressure
 
 - Use bounded `tokio::sync::mpsc` channels for event transport.
+- Maintain dual stream surfaces:
+  - normalized stream (`StreamEvent`) for stable SDK semantics;
+  - raw stream (`RawStreamFrame`) for advanced consumers.
 - Support configurable overflow policy:
-  - `BlockProducer` (default): preserve correctness under load.
+  - `PauseProducer` (default): preserve correctness under load.
   - `DropNonCritical`: drop heartbeat/diagnostic events only.
 - Maintain separate channel classes for:
   - critical control events (tool calls, approvals, errors),
-  - output deltas,
+  - normalized output deltas,
+  - raw transport frames,
   - telemetry events.
 
 ## 8.6 Tool orchestration
@@ -986,8 +1068,8 @@ Context assembly pipeline:
 
 - Every eligible run contributes to dataset collector (opt-in filters).
 - Sampler supports deterministic and stratified modes.
-- Shadow gate runs first and logs without blocking.
-- Blocking gate enforces policy when confidence is sufficient.
+- Shadow gate runs first and logs without enforcement.
+- Enforcing gate applies policy when confidence is sufficient.
 - Gate decisions are auditable via Xray.
 
 ## 8.11 Deterministic replay
@@ -1087,7 +1169,7 @@ Go/no-go metrics:
 
 ## 31-60 days
 - Add memory lanes, eval collector, sampler, shadow gate.
-- Add MCP bridge and approvals/todo/steering workflows.
+- Add MCP bridge and approvals/todo/steering surfaces.
 - Add multi-model fallback with required capabilities.
 - Add sensitive trace redaction and PII rule packs.
 - Add compensation registry and undo plan/execution APIs.
@@ -1098,14 +1180,14 @@ Go/no-go metrics:
 - Replay success rate > 95% in strict-compatible scenarios.
 
 ## 61-90 days
-- Add blocking gates with policy rollback path.
+- Add enforcing gates with policy rollback path.
 - Expand provider adapters (at least 3 major providers + custom adapter template).
 - Optimize memory/latency hot paths.
 - Freeze API for `0.1.0` contract release.
 - Stabilize wrapper API contracts over kernel control-plane.
 
 Go/no-go metrics:
-- Blocking gate false-block rate < 1% on curated validation set.
+- Enforcing gate false-deny rate < 1% on curated validation set.
 - P99 memory ceiling within agreed budget under 4x concurrency load.
 - Compatibility tests pass across supported provider capability matrix.
 
@@ -1115,7 +1197,8 @@ Go/no-go metrics:
 
 ## Key risks
 - Provider reasoning and tool-stream semantics continue to change quickly.
-- Eval judges can drift; hard gates can over-block without shadow soak.
+- Raw stream consumers can become provider-coupled and face higher upgrade churn.
+- Eval judges can drift; hard gates can over-deny without shadow soak.
 - PII detection quality varies significantly by domain/language.
 - Wrapper contracts can drift from kernel contracts without strict compatibility tests.
 
@@ -1191,4 +1274,4 @@ All links accessed on **February 9, 2026** unless otherwise noted.
 
 ## 14) Contract Summary
 
-This contract is ready to start implementation as a crate family while keeping the public API stable and consumer-first. It is deliberately capability-complete for the requested 37 features, explicitly separates kernel vs extension vs wrapper responsibilities, and includes eval-first controls (shadow + blocking gates) plus audit/undo contracts so quality can be enforced safely over time.
+This contract is ready to start implementation as a crate family while keeping the public API stable and consumer-first. It is deliberately capability-complete for the requested 37 features, explicitly separates kernel vs extension vs wrapper responsibilities, provides dual streaming surfaces (normalized default + raw opt-in), and includes eval-first controls (shadow + enforcing gates) plus audit/undo contracts so quality can be enforced safely over time.
