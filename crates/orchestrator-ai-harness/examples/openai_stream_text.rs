@@ -14,7 +14,7 @@ async fn main() -> Result<(), HarnessError> {
     let mut run = harness
         .session(SessionConfig::named("stream"))
         .run(ModelRef::new("openai", "gpt-5-nano"))
-        .system_prompt("Reply with one short line.")
+        .system_prompt("Reply to test AI harness streaming.")
         .user_text("Stream a greeting.")
         .openai_options(OpenAiRequestOptions::default().store(false))
         .start_stream()
