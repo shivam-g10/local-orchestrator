@@ -1,14 +1,24 @@
-/target
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Env / secrets
 .env
-/out
-expense_report.xlsx
-stock_report.xlsx
-~*
+.env.*
+!.env.example
 
+# Logs / temp
+*.log
+tmp/
+temp/
 
-# Local Codex skill files
-skills/
-.agents/skills/
-AGENTS.md
-.vscode
-skill-evals
+# Build artifacts
+dist/
+build/
+target/
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc

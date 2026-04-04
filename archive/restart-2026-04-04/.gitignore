@@ -1,0 +1,14 @@
+/target
+.env
+/out
+expense_report.xlsx
+stock_report.xlsx
+~*
+
+
+# Local Codex skill files
+skills/
+.agents/skills/
+AGENTS.md
+.vscode
+skill-evals

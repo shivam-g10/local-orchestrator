@@ -1,40 +1,43 @@
-# Light weight workflow orchestration for local system
+# Local Orchestration
 
-Currently PoC.
+Local-first automation assistant for a solo founder.
 
-**Quality:** Node and block config use strong types only (`BlockConfig`, `FileReadConfig`); no `serde_json::Value` or ad-hoc string keys in the public API (per [docs/plan.md](docs/plan.md) cross-cutting quality rules).
+## Goal
 
-## Workspace layout
+Turn natural-language requirements into reliable on-device workflows with human approval gates and clear auditability.
 
-- **crates/orchestrator-core** — library: workflow definition, run state, typed block IO, built-in blocks, minimal sync runner.
-- **crates/orchestrator-examples** — binary that uses orchestrator-core to run sample workflows (expense report, stock report, cyclic demo, etc.); use the CLI to choose a workflow.
+## Primary use cases
 
-## Foundation demo
+1. PLG CRM automation on Excel/Google Sheets
+2. LinkedIn post generation
+3. Market research automation
+4. Newsletter research + human approval/edit
+5. Meeting prep and follow-up automation
 
-Run the “Read file from disk” workflow (one block reads `README.md` and prints its contents):
+## Delivery model
 
-```bash
-cargo run -p orchestrator-examples
-```
+Work moves through this exact sequence:
 
-## Testing
+1. PRD
+2. Review
+3. Tests
+4. Implementation
+5. QA
+6. Ship
 
-Run all workspace tests:
+Each PRD is the smallest valuable change.
 
-```bash
-cargo test --workspace
-```
+## Versioning
 
-Run only orchestrator-core unit tests:
+- Stay below `1.0.0` until the first fully functioning product is complete.
+- Use `0.x.y`.
 
-```bash
-cargo test -p orchestrator-core
-```
+## Repo map
 
-## Linting (Clippy)
+- `docs/pm`: vision, PRDs, stage templates, process rules
+- `docs/tech`: implementation specs and system diagrams
+- `archive/`: legacy project state before reset
 
-Run Clippy with warnings as errors on the orchestrator crates:
+## Current state
 
-```bash
-cargo clippy -p orchestrator-core -p orchestrator-examples -- -D warnings
-```
+Project reset complete. This repo now starts from PM + system design scaffolding.
